@@ -60,11 +60,19 @@ Already-ingested emails from the partial sync are preserved. The next sync skips
 
 ## Configuration
 
-| Environment Variable           | Default     | Description                                           |
-| ------------------------------ | ----------- | ----------------------------------------------------- |
-| `SYNC_FREQUENCY`               | `* * * * *` | Cron pattern for continuous sync scheduling           |
-| `INGESTION_WORKER_CONCURRENCY` | `5`         | Number of `process-mailbox` jobs that run in parallel |
-| `MEILI_INDEXING_BATCH`         | `500`       | Number of emails per `index-email-batch` job          |
+Resource usage is controlled by `RESOURCE_PROFILE` (`auto`, `low`, `balanced`, `high`). See [Low-Resource Deployment](../user-guides/low-resource-deployment.md) for 6 GB / 4-core setups.
+
+| Environment Variable           | Profile default (low / balanced / high) | Description                                           |
+| ------------------------------ | --------------------------------------- | ----------------------------------------------------- |
+| `RESOURCE_PROFILE`             | `auto`                                  | Base tuning preset; `auto` detects system RAM         |
+| `SYNC_FREQUENCY`               | `*/15` / `*/5` / `* * * * *` cron       | Continuous sync scheduling                          |
+| `INGESTION_WORKER_CONCURRENCY` | `1` / `2` / `5`                         | Parallel `process-mailbox` jobs                       |
+| `INDEXING_WORKER_CONCURRENCY`  | `1` / `2` / `3`                         | Parallel `index-email-batch` jobs                     |
+| `MEILI_INDEXING_BATCH`         | `25` / `50` / `100`                     | Emails per indexing batch job                         |
+| `INDEXING_EMAIL_CONCURRENCY`   | `2` / `5` / `10`                        | Parallel emails inside one batch job                  |
+| `NODE_MAX_OLD_SPACE_MB`        | `1024` / `1536` / `2048`                | Node.js heap cap (set before process start)           |
+
+Individual variables override the active profile when set explicitly.
 
 ### Tuning `INGESTION_WORKER_CONCURRENCY`
 

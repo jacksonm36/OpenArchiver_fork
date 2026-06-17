@@ -4,6 +4,7 @@ import {
 	EmailDocument,
 	EmailObject,
 	PendingEmail,
+	IndexingHint,
 } from '@open-archiver/types';
 import { SearchService } from './SearchService';
 import { StorageService } from './StorageService';
@@ -14,6 +15,8 @@ import { eq } from 'drizzle-orm';
 import { streamToBuffer } from '../helpers/streamToBuffer';
 import { simpleParser, type Attachment as ParsedAttachment } from 'mailparser';
 import { logger } from '../config/logger';
+import { mapWithConcurrency } from '../helpers/parallel';
+import { config } from '../config';
 
 interface DbRecipients {
 	to: { name: string; address: string }[];
@@ -86,18 +89,20 @@ export class IndexingService {
 		logger.info({ batchSize: emails.length }, 'Starting batch indexing of emails');
 
 		try {
-			const CONCURRENCY_LIMIT = 10;
 			const rawDocuments: EmailDocument[] = [];
 
-			for (let i = 0; i < emails.length; i += CONCURRENCY_LIMIT) {
-				const batch = emails.slice(i, i + CONCURRENCY_LIMIT);
+			for (let i = 0; i < emails.length; i += config.resources.indexingEmailConcurrency) {
+				const batch = emails.slice(i, i + config.resources.indexingEmailConcurrency);
 
 				const batchDocuments = await Promise.allSettled(
 					batch.map(async (pendingEmail) => {
 						try {
-							const document = await this.indexEmailById(
-								pendingEmail.archivedEmailId
-							);
+							const document = pendingEmail.indexingHint
+								? await this.indexEmailWithHint(
+										pendingEmail.archivedEmailId,
+										pendingEmail.indexingHint
+									)
+								: await this.indexEmailById(pendingEmail.archivedEmailId);
 							if (document) {
 								return document;
 							}
@@ -196,6 +201,66 @@ export class IndexingService {
 			);
 			throw error;
 		}
+	}
+
+	private async indexEmailWithHint(
+		emailId: string,
+		hint: IndexingHint
+	): Promise<EmailDocument | null> {
+		const email = await this.dbService.db.query.archivedEmails.findFirst({
+			where: eq(archivedEmails.id, emailId),
+		});
+
+		if (!email) {
+			throw new Error(`Email with ID ${emailId} not found for indexing.`);
+		}
+
+		let emailAttachmentsResult: Attachment[] = [];
+		if (email.hasAttachments) {
+			emailAttachmentsResult = await this.dbService.db
+				.select({
+					id: attachments.id,
+					filename: attachments.filename,
+					mimeType: attachments.mimeType,
+					sizeBytes: attachments.sizeBytes,
+					contentHashSha256: attachments.contentHashSha256,
+					storagePath: attachments.storagePath,
+				})
+				.from(emailAttachments)
+				.innerJoin(attachments, eq(emailAttachments.attachmentId, attachments.id))
+				.where(eq(emailAttachments.emailId, emailId));
+		}
+
+		let attachmentContents: { filename: string; content: string }[] = [];
+		if (emailAttachmentsResult.length > 0) {
+			attachmentContents = await this.extractAttachmentContents(emailAttachmentsResult);
+		} else if (email.hasAttachments) {
+			// Preserve-original mode: attachments live inside the stored EML
+			const emailBodyStream = await this.storageService.get(email.storagePath);
+			const emailBodyBuffer = await streamToBuffer(emailBodyStream);
+			const parsedEmail = await simpleParser(emailBodyBuffer);
+			if (parsedEmail.attachments.length > 0) {
+				attachmentContents = await this.extractInlineAttachmentContents(
+					parsedEmail.attachments
+				);
+			}
+		}
+
+		return {
+			id: email.id,
+			userEmail: email.userEmail,
+			from: hint.from || email.senderEmail,
+			to: hint.to,
+			cc: hint.cc,
+			bcc: hint.bcc,
+			subject: hint.subject || email.subject || '',
+			body: sanitizeText(hint.body),
+			attachments: attachmentContents,
+			timestamp: new Date(email.sentAt).getTime(),
+			ingestionSourceId: email.ingestionSourceId,
+			tags: (email.tags as string[] | null) ?? [],
+			hasAttachments: email.hasAttachments,
+		};
 	}
 
 	private async indexEmailById(emailId: string): Promise<EmailDocument | null> {
@@ -374,6 +439,8 @@ export class IndexingService {
 			attachments: extractedAttachments,
 			timestamp: new Date(email.receivedAt).getTime(),
 			ingestionSourceId: ingestionSourceId,
+			tags: email.tags ?? [],
+			hasAttachments: email.attachments.length > 0,
 		};
 	}
 
@@ -419,6 +486,8 @@ export class IndexingService {
 			attachments: attachmentContents,
 			timestamp: new Date(email.sentAt).getTime(),
 			ingestionSourceId: email.ingestionSourceId,
+			tags: (email.tags as string[] | null) ?? [],
+			hasAttachments: email.hasAttachments,
 		};
 	}
 
@@ -431,52 +500,66 @@ export class IndexingService {
 	private async extractInlineAttachmentContents(
 		parsedAttachments: ParsedAttachment[]
 	): Promise<{ filename: string; content: string }[]> {
-		const extracted: { filename: string; content: string }[] = [];
-		for (const attachment of parsedAttachments) {
-			try {
-				const textContent = await extractText(
-					attachment.content,
-					attachment.contentType || ''
-				);
-				extracted.push({
-					filename: attachment.filename || 'untitled',
-					content: textContent,
-				});
-			} catch (error) {
-				logger.warn(
-					{
-						filename: attachment.filename,
-						mimeType: attachment.contentType,
-						error: error instanceof Error ? error.message : String(error),
-					},
-					'Failed to extract text from inline attachment in preserve-original mode'
-				);
+		const results = await mapWithConcurrency(
+			parsedAttachments,
+			config.resources.indexingAttachmentConcurrency,
+			async (attachment) => {
+				try {
+					const textContent = await extractText(
+						attachment.content,
+						attachment.contentType || ''
+					);
+					return {
+						filename: attachment.filename || 'untitled',
+						content: textContent,
+					};
+				} catch (error) {
+					logger.warn(
+						{
+							filename: attachment.filename,
+							mimeType: attachment.contentType,
+							error: error instanceof Error ? error.message : String(error),
+						},
+						'Failed to extract text from inline attachment in preserve-original mode'
+					);
+					return null;
+				}
 			}
-		}
-		return extracted;
+		);
+
+		return results.filter(
+			(result): result is { filename: string; content: string } => result !== null
+		);
 	}
 
 	private async extractAttachmentContents(
-		attachments: Attachment[]
+		attachmentRecords: Attachment[]
 	): Promise<{ filename: string; content: string }[]> {
-		const extractedAttachments = [];
-		for (const attachment of attachments) {
-			try {
-				const fileStream = await this.storageService.get(attachment.storagePath);
-				const fileBuffer = await streamToBuffer(fileStream);
-				const textContent = await extractText(fileBuffer, attachment.mimeType || '');
-				extractedAttachments.push({
-					filename: attachment.filename,
-					content: textContent,
-				});
-			} catch (error) {
-				console.error(
-					`Failed to extract text from attachment: ${attachment.filename}`,
-					error
-				);
+		const results = await mapWithConcurrency(
+			attachmentRecords,
+			config.resources.indexingAttachmentConcurrency,
+			async (attachment) => {
+				try {
+					const fileStream = await this.storageService.get(attachment.storagePath);
+					const fileBuffer = await streamToBuffer(fileStream);
+					const textContent = await extractText(fileBuffer, attachment.mimeType || '');
+					return {
+						filename: attachment.filename,
+						content: textContent,
+					};
+				} catch (error) {
+					logger.error(
+						{ filename: attachment.filename, error },
+						'Failed to extract text from attachment'
+					);
+					return null;
+				}
 			}
-		}
-		return extractedAttachments;
+		);
+
+		return results.filter(
+			(result): result is { filename: string; content: string } => result !== null
+		);
 	}
 
 	private shouldExtractText(mimeType: string): boolean {
@@ -543,6 +626,8 @@ export class IndexingService {
 			attachments: Array.isArray(doc.attachments) ? doc.attachments : [],
 			timestamp: typeof doc.timestamp === 'number' ? doc.timestamp : Date.now(),
 			ingestionSourceId: doc.ingestionSourceId || 'unknown',
+			tags: Array.isArray(doc.tags) ? doc.tags : [],
+			hasAttachments: doc.hasAttachments ?? (doc.attachments?.length ?? 0) > 0,
 		};
 	}
 

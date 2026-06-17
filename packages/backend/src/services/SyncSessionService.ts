@@ -1,6 +1,6 @@
 import { db } from '../database';
 import { syncSessions, ingestionSources } from '../database/schema';
-import { eq, lt, sql } from 'drizzle-orm';
+import { eq, lt, sql, desc } from 'drizzle-orm';
 import type { SyncState, ProcessMailboxError } from '@open-archiver/types';
 import { logger } from '../config/logger';
 
@@ -169,6 +169,22 @@ export class SyncSessionService {
 		} catch (error) {
 			logger.warn({ err: error, sessionId }, 'Failed to update session heartbeat');
 		}
+	}
+
+	/**
+	 * Returns the most recent sync session for a source, if any.
+	 */
+	public static async findLatestBySourceId(
+		ingestionSourceId: string
+	): Promise<SyncSessionRecord | null> {
+		const [session] = await db
+			.select()
+			.from(syncSessions)
+			.where(eq(syncSessions.ingestionSourceId, ingestionSourceId))
+			.orderBy(desc(syncSessions.createdAt))
+			.limit(1);
+
+		return session ?? null;
 	}
 
 	/**

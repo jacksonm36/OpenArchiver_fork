@@ -5,11 +5,16 @@ import type {
 	SearchResult,
 	EmailDocument,
 	TopSender,
-	User,
 } from '@open-archiver/types';
 import { FilterBuilder } from './FilterBuilder';
 import { AuditService } from './AuditService';
 import { IngestionService } from './IngestionService';
+import {
+	buildMeiliFilterParts,
+	buildSearchText,
+	hasStructuralFilters,
+	resolveAttributesToSearchOn,
+} from '../helpers/searchFilterBuilder';
 
 export class SearchService {
 	private client: MeiliSearch;
@@ -63,8 +68,18 @@ export class SearchService {
 		userId: string,
 		actorIp: string
 	): Promise<SearchResult> {
-		const { query, filters, page = 1, limit = 10, matchingStrategy = 'last' } = dto;
+		const { query: keywords = '', filters, page = 1, limit = 10, matchingStrategy = 'last' } = dto;
 		const index = await this.getIndex<EmailDocument>('emails');
+
+		const { query, fieldAttributes } = buildSearchText(keywords, filters);
+		const hasKeywords = Boolean(keywords.trim());
+
+		if (!query && !hasStructuralFilters(filters)) {
+			throw new Error('Search requires keywords or at least one filter');
+		}
+
+		const effectiveStrategy =
+			query.split(/\s+/).filter(Boolean).length > 1 ? 'all' : matchingStrategy;
 
 		const searchParams: SearchParams = {
 			limit,
@@ -72,44 +87,36 @@ export class SearchService {
 			attributesToHighlight: ['*'],
 			showMatchesPosition: true,
 			sort: ['timestamp:desc'],
-			matchingStrategy,
+			matchingStrategy: effectiveStrategy,
 		};
 
-		if (filters) {
-			const filterParts: string[] = [];
-			for (const [key, value] of Object.entries(filters)) {
-				// Expand ingestionSourceId to the full merge group
-				if (key === 'ingestionSourceId' && typeof value === 'string') {
-					const groupIds = await IngestionService.findGroupSourceIds(value);
-					if (groupIds.length === 1) {
-						filterParts.push(`ingestionSourceId = '${groupIds[0]}'`);
-					} else {
-						const inList = groupIds.map((id) => `'${id}'`).join(', ');
-						filterParts.push(`ingestionSourceId IN [${inList}]`);
-					}
-				} else if (typeof value === 'string') {
-					filterParts.push(`${key} = '${value}'`);
-				} else {
-					filterParts.push(`${key} = ${value}`);
-				}
-			}
-			searchParams.filter = filterParts.join(' AND ');
+		const attributesToSearchOn = resolveAttributesToSearchOn(
+			filters,
+			fieldAttributes,
+			hasKeywords
+		);
+		if (attributesToSearchOn?.length) {
+			searchParams.attributesToSearchOn = attributesToSearchOn;
 		}
 
-		// Create a filter based on the user's permissions.
-		// This ensures that the user can only search for emails they are allowed to see.
+		if (filters) {
+			const filterParts = await buildMeiliFilterParts(filters, (sourceId) =>
+				IngestionService.findGroupSourceIds(sourceId)
+			);
+			if (filterParts.length > 0) {
+				searchParams.filter = filterParts.join(' AND ');
+			}
+		}
+
 		const { searchFilter } = await FilterBuilder.create(userId, 'archive', 'read');
 		if (searchFilter) {
-			// Convert the MongoDB-style filter from CASL to a MeiliSearch filter string.
 			if (searchParams.filter) {
-				// If there are existing filters, append the access control filter.
 				searchParams.filter = `${searchParams.filter} AND ${searchFilter}`;
 			} else {
-				// Otherwise, just use the access control filter.
 				searchParams.filter = searchFilter;
 			}
 		}
-		// console.log('searchParams', searchParams);
+
 		const searchResults = await index.search(query, searchParams);
 
 		await this.auditService.createAuditLog({
@@ -119,11 +126,11 @@ export class SearchService {
 			targetId: '',
 			actorIp,
 			details: {
-				query,
+				query: keywords,
 				filters,
 				page,
 				limit,
-				matchingStrategy,
+				matchingStrategy: effectiveStrategy,
 			},
 		});
 
@@ -139,6 +146,22 @@ export class SearchService {
 		};
 	}
 
+	public async getAvailableTags(userId: string): Promise<string[]> {
+		const index = await this.getIndex<EmailDocument>('emails');
+		const { searchFilter } = await FilterBuilder.create(userId, 'archive', 'read');
+
+		const searchResults = await index.search('', {
+			facets: ['tags'],
+			limit: 0,
+			filter: searchFilter || undefined,
+		});
+
+		const distribution = searchResults.facetDistribution?.tags;
+		if (!distribution) return [];
+
+		return Object.keys(distribution).sort((a, b) => a.localeCompare(b));
+	}
+
 	public async getTopSenders(limit = 10): Promise<TopSender[]> {
 		const index = await this.getIndex<EmailDocument>('emails');
 		const searchResults = await index.search('', {
@@ -150,7 +173,6 @@ export class SearchService {
 			return [];
 		}
 
-		// Sort and take top N
 		const sortedSenders = Object.entries(searchResults.facetDistribution.from)
 			.sort(([, countA], [, countB]) => countB - countA)
 			.slice(0, limit)
@@ -169,6 +191,7 @@ export class SearchService {
 				'to',
 				'cc',
 				'bcc',
+				'tags',
 				'attachments.filename',
 				'attachments.content',
 				'userEmail',
@@ -179,6 +202,8 @@ export class SearchService {
 				'cc',
 				'bcc',
 				'timestamp',
+				'tags',
+				'hasAttachments',
 				'ingestionSourceId',
 				'userEmail',
 			],

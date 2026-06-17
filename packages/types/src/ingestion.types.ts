@@ -159,6 +159,51 @@ export interface UpdateIngestionSourceDto {
 	mergedIntoId?: string | null;
 }
 
+export interface IngestionQueueJobSummary {
+	queue: 'ingestion' | 'indexing';
+	id: string;
+	name: string;
+	state: string;
+	failedReason?: string;
+	stacktrace?: string[];
+	timestamp?: number;
+}
+
+export interface IngestionDiagnostics {
+	sourceId: string;
+	status: IngestionStatus;
+	provider: IngestionProvider;
+	lastSyncStatusMessage?: string | null;
+	lastSyncStartedAt?: string | null;
+	lastSyncFinishedAt?: string | null;
+	archivedEmailCount: number;
+	indexedEmailCount: number;
+	pendingIndexCount: number;
+	activeSyncSession: {
+		id: string;
+		isInitialImport: boolean;
+		totalMailboxes: number;
+		completedMailboxes: number;
+		failedMailboxes: number;
+		errorMessages: string[];
+		lastActivityAt: string;
+	} | null;
+	queue: {
+		ingestionActive: number;
+		ingestionWaiting: number;
+		indexingActive: number;
+		indexingWaiting: number;
+		recentFailures: IngestionQueueJobSummary[];
+	};
+	progress: {
+		phase: 'idle' | 'importing' | 'indexing' | 'complete' | 'error';
+		mailboxPercent: number | null;
+		indexingPercent: number | null;
+		label: string;
+		isIndeterminate: boolean;
+	};
+}
+
 export interface IContinuousSyncJob {
 	ingestionSourceId: string;
 }

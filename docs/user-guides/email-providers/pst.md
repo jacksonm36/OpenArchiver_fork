@@ -27,3 +27,14 @@ To ensure a successful import, you should prepare your PST file according to the
 6.  Click the **Submit** button.
 
 OpenArchiver will then start importing the emails from the PST file. The ingestion process may take some time, depending on the size of the file.
+
+## Performance Tips
+
+For large PST files (several GB or tens of thousands of messages):
+
+- **6 GB RAM / 4 cores:** use `RESOURCE_PROFILE=low` or `docker-compose.low-resource.yml`. See [Low-Resource Deployment](../low-resource-deployment.md).
+- **Use Local Path instead of upload** for files larger than a few hundred MB. Mount the PST inside the container (see above) so it is opened in place without copying.
+- **Leave `TIKA_URL` unset** on low-RAM hosts unless you need attachment OCR.
+- **Re-imports skip duplicates early** when messages have a `Message-ID`, avoiding redundant parsing work.
+
+For high-performance servers, set `RESOURCE_PROFILE=high` and increase worker concurrency in `.env`.

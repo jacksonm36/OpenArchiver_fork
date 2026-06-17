@@ -329,5 +329,11 @@ export const createIngestionRouter = (
 		ingestionController.unmerge
 	);
 
+	router.get(
+		'/:id/diagnostics',
+		requirePermission('read', 'ingestion'),
+		ingestionController.getDiagnostics
+	);
+
 	return router;
 };

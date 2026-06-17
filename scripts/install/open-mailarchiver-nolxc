@@ -1,0 +1,699 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Open Archiver bare-metal installer (idempotent, multi-CPU, multi-OS)
+# Fork: https://github.com/jacksonm36/OpenArchiver_fork
+#
+# - Debian/Ubuntu (apt) and RHEL/Fedora (dnf/yum)
+# - Valkey, PostgreSQL 17, Node 22 + pnpm
+# - Meilisearch v1.38 (arch-aware)
+# - Apache Tika 3.2.3 (optional — skipped on low-RAM hosts unless --with-tika)
+# - RESOURCE_PROFILE auto-detection (low / balanced / high)
+# - PST-optimized defaults, generated secrets, systemd services
+#
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/jacksonm36/install-scripts/main/open-mailarchiver-nolxc | bash
+#   # or clone this repo and run:  sudo bash scripts/install/open-mailarchiver-nolxc
+#
+# Options:
+#   --resource-profile auto|low|balanced|high   Override RAM/CPU tuning (default: auto)
+#   --with-tika                                 Force Apache Tika install (~500 MB RAM)
+#   --no-tika                                   Skip Tika even on large hosts
+#   --update                                    git pull + rebuild only (skip OS packages)
+
+OA_REPO="${OA_REPO:-https://github.com/jacksonm36/OpenArchiver_fork.git}"
+OA_BRANCH="${OA_BRANCH:-main}"
+OA_DIR="${OA_DIR:-/opt/openarchiver}"
+OA_DATA="${OA_DATA:-/opt/openarchiver-data}"
+MEILI_VERSION="${MEILI_VERSION:-v1.38.0}"
+TIKA_VERSION="${TIKA_VERSION:-3.2.3}"
+
+RESOURCE_PROFILE_REQUEST="${RESOURCE_PROFILE_REQUEST:-auto}"
+INSTALL_TIKA=""
+UPDATE_ONLY=0
+
+msg_info() { echo -e "\e[34m[INFO]\e[0m $*"; }
+msg_ok()   { echo -e "\e[32m[ OK ]\e[0m $*"; }
+msg_warn() { echo -e "\e[33m[WARN]\e[0m $*"; }
+msg_err()  { echo -e "\e[31m[ERR]\e[0m $*"; }
+
+usage() {
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+  exit 0
+}
+
+parse_args() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --resource-profile)
+        RESOURCE_PROFILE_REQUEST="${2:?missing value for --resource-profile}"
+        shift 2
+        ;;
+      --with-tika) INSTALL_TIKA=1; shift ;;
+      --no-tika)   INSTALL_TIKA=0; shift ;;
+      --update)    UPDATE_ONLY=1; shift ;;
+      -h|--help)   usage ;;
+      *) msg_err "Unknown option: $1"; usage ;;
+    esac
+  done
+}
+
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    msg_err "This installer must be run as root."
+    exit 1
+  fi
+}
+
+gen_alnum() {
+  local len="${1:-18}"
+  local out=""
+  while [[ "${#out}" -lt "$len" ]]; do
+    if command -v openssl >/dev/null 2>&1; then
+      out+="$(openssl rand -base64 48 | tr -dc 'A-Za-z0-9' | head -c "$len" || true)"
+    else
+      out+="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$len" || true)"
+    fi
+  done
+  printf '%s' "${out:0:len}"
+}
+
+detect_os() {
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    ID_LIKE="${ID_LIKE:-}"
+  else
+    msg_err "/etc/os-release not found; unsupported OS"
+    exit 1
+  fi
+  case "$ID" in
+    debian|ubuntu) PM=apt-get; OS_FAMILY=debian ;;
+    fedora) PM=dnf; OS_FAMILY=fedora ;;
+    rhel|centos|almalinux|rocky|ol|oraclelinux) PM=dnf; OS_FAMILY=rhel ;;
+    *)
+      if   [[ "$ID_LIKE" =~ (debian|ubuntu) ]]; then PM=apt-get; OS_FAMILY=debian
+      elif [[ "$ID_LIKE" =~ (rhel|fedora|centos) ]]; then PM=dnf; OS_FAMILY=rhel
+      else msg_err "Unsupported OS: $ID"; exit 1
+      fi
+      ;;
+  esac
+}
+
+total_ram_gb() {
+  local mem_kb
+  mem_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo)"
+  echo $(( (mem_kb + 512 * 1024) / 1024 / 1024 ))
+}
+
+cpu_count() {
+  nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4
+}
+
+# Aligns with packages/backend/src/config/resources.ts
+detect_resource_profile() {
+  local mem_gb cpus profile
+  mem_gb="$(total_ram_gb)"
+  cpus="$(cpu_count)"
+
+  if [[ "$RESOURCE_PROFILE_REQUEST" != "auto" ]]; then
+    profile="$RESOURCE_PROFILE_REQUEST"
+  elif [[ "$mem_gb" -lt 8 || ( "$mem_gb" -lt 10 && "$cpus" -le 4 ) ]]; then
+    profile="low"
+  elif [[ "$mem_gb" -lt 16 ]]; then
+    profile="balanced"
+  else
+    profile="high"
+  fi
+
+  case "$profile" in
+    low)
+      RESOURCE_PROFILE=low
+      NODE_MAX_OLD_SPACE_MB=1024
+      MEILI_INDEXING_BATCH=25
+      SYNC_FREQUENCY='*/15 * * * *'
+      INGESTION_WORKER_CONCURRENCY=1
+      INDEXING_WORKER_CONCURRENCY=1
+      INDEXING_EMAIL_CONCURRENCY=2
+      INDEXING_ATTACHMENT_CONCURRENCY=2
+      ATTACHMENT_STORAGE_CONCURRENCY=2
+      MEILI_MAX_INDEXING_MEMORY=384MiB
+      MEILI_MAX_INDEXING_THREADS=2
+      VALKEY_MAXMEMORY=128mb
+      ;;
+    balanced)
+      RESOURCE_PROFILE=balanced
+      NODE_MAX_OLD_SPACE_MB=1536
+      MEILI_INDEXING_BATCH=50
+      SYNC_FREQUENCY='*/5 * * * *'
+      INGESTION_WORKER_CONCURRENCY=2
+      INDEXING_WORKER_CONCURRENCY=2
+      INDEXING_EMAIL_CONCURRENCY=5
+      INDEXING_ATTACHMENT_CONCURRENCY=3
+      ATTACHMENT_STORAGE_CONCURRENCY=3
+      MEILI_MAX_INDEXING_MEMORY=512MiB
+      MEILI_MAX_INDEXING_THREADS=2
+      VALKEY_MAXMEMORY=256mb
+      ;;
+    high)
+      RESOURCE_PROFILE=high
+      NODE_MAX_OLD_SPACE_MB=2048
+      MEILI_INDEXING_BATCH=100
+      SYNC_FREQUENCY='* * * * *'
+      INGESTION_WORKER_CONCURRENCY=5
+      INDEXING_WORKER_CONCURRENCY=3
+      INDEXING_EMAIL_CONCURRENCY=10
+      INDEXING_ATTACHMENT_CONCURRENCY=5
+      ATTACHMENT_STORAGE_CONCURRENCY=5
+      MEILI_MAX_INDEXING_MEMORY=1GiB
+      MEILI_MAX_INDEXING_THREADS=4
+      VALKEY_MAXMEMORY=512mb
+      ;;
+    *)
+      msg_err "Invalid resource profile: $profile"
+      exit 1
+      ;;
+  esac
+
+  msg_info "Detected ${mem_gb} GB RAM, ${cpus} CPUs → RESOURCE_PROFILE=${RESOURCE_PROFILE}"
+}
+
+resolve_tika_install() {
+  if [[ "$INSTALL_TIKA" == "1" ]]; then return 0; fi
+  if [[ "$INSTALL_TIKA" == "0" ]]; then return 1; fi
+  [[ "$RESOURCE_PROFILE" != "low" ]]
+}
+
+install_base_packages() {
+  case "$OS_FAMILY" in
+    debian)
+      $PM update -y
+      $PM install -y curl ca-certificates sudo gnupg lsb-release \
+        build-essential pkg-config libssl-dev jq tar git coreutils findutils \
+        unzip iproute2 util-linux
+      ;;
+    fedora|rhel)
+      $PM -y install curl ca-certificates sudo gnupg2 redhat-lsb-core \
+        "@development-tools" pkgconfig openssl-devel jq tar git coreutils findutils \
+        unzip iproute util-linux
+      ;;
+  esac
+}
+
+install_valkey() {
+  case "$OS_FAMILY" in
+    debian) $PM install -y valkey ;;
+    fedora|rhel) $PM -y install valkey ;;
+  esac
+}
+
+configure_valkey() {
+  local conf=""
+  for conf in /etc/valkey/valkey.conf /etc/valkey.conf /etc/redis/valkey.conf; do
+    [[ -f "$conf" ]] && break
+  done
+  if [[ -z "$conf" || ! -f "$conf" ]]; then
+    msg_warn "Valkey config not found; using package defaults (set REDIS_PASSWORD manually if needed)"
+    return 0
+  fi
+
+  if grep -qE '^[#[:space:]]*requirepass' "$conf"; then
+    sed -i "s/^[#[:space:]]*requirepass.*/requirepass ${REDIS_PASSWORD}/" "$conf"
+  else
+    echo "requirepass ${REDIS_PASSWORD}" >> "$conf"
+  fi
+
+  if grep -qE '^[#[:space:]]*maxmemory' "$conf"; then
+    sed -i "s/^[#[:space:]]*maxmemory.*/maxmemory ${VALKEY_MAXMEMORY}/" "$conf"
+  else
+    echo "maxmemory ${VALKEY_MAXMEMORY}" >> "$conf"
+  fi
+
+  if ! grep -q '^maxmemory-policy' "$conf"; then
+    echo "maxmemory-policy allkeys-lru" >> "$conf"
+  fi
+
+  systemctl enable -q valkey 2>/dev/null || systemctl enable -q valkey-server 2>/dev/null || true
+  systemctl restart valkey 2>/dev/null || systemctl restart valkey-server 2>/dev/null || true
+  msg_ok "Valkey configured (maxmemory ${VALKEY_MAXMEMORY})"
+}
+
+install_java_for_tika() {
+  case "$OS_FAMILY" in
+    debian)
+      $PM install -y openjdk-17-jre-headless || true
+      $PM install -y openjdk-21-jre-headless || true
+      $PM install -y default-jre-headless || true
+      ;;
+    fedora|rhel)
+      $PM -y install java-17-openjdk || true
+      $PM -y install java-21-openjdk || true
+      $PM -y install java-latest-openjdk || true
+      ;;
+  esac
+  command -v java >/dev/null 2>&1 || { msg_err "Java runtime install failed"; exit 1; }
+}
+
+install_node() {
+  local NODE_VERSION="22"
+  if ! command -v node >/dev/null 2>&1; then
+    if [[ "$OS_FAMILY" == "debian" ]]; then
+      curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash -
+      $PM install -y nodejs
+    else
+      curl -fsSL "https://rpm.nodesource.com/setup_${NODE_VERSION}.x" | bash -
+      $PM -y install nodejs
+    fi
+  fi
+  corepack enable
+  corepack prepare pnpm@10.13.1 --activate
+}
+
+install_postgres() {
+  PG_VERSION="17"
+  if command -v psql >/dev/null 2>&1; then
+    return 0
+  fi
+  case "$OS_FAMILY" in
+    debian)
+      echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" >/etc/apt/sources.list.d/pgdg.list
+      curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+      $PM update -y
+      $PM install -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}"
+      ;;
+    fedora|rhel)
+      rpm -qi pgdg-redhat-repo >/dev/null 2>&1 || \
+        dnf -y install "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$(rpm -E '%{rhel}')-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
+      $PM -y install "postgresql${PG_VERSION//./}" "postgresql${PG_VERSION//./}-server"
+      ;;
+  esac
+}
+
+start_postgres() {
+  msg_info "Starting PostgreSQL service"
+  command -v systemctl >/dev/null 2>&1 || { msg_err "systemctl not found"; exit 1; }
+
+  if [[ "$OS_FAMILY" != "debian" ]]; then
+    if [[ -x "/usr/pgsql-${PG_VERSION}/bin/postgresql-${PG_VERSION}-setup" ]]; then
+      "/usr/pgsql-${PG_VERSION}/bin/postgresql-${PG_VERSION}-setup" initdb || true
+    elif command -v "postgresql-${PG_VERSION}-setup" >/dev/null 2>&1; then
+      "postgresql-${PG_VERSION}-setup" initdb || true
+    elif command -v postgresql-setup >/dev/null 2>&1; then
+      postgresql-setup --initdb || true
+    fi
+  fi
+
+  systemctl enable -q --now "postgresql@${PG_VERSION}-main" 2>/dev/null || true
+  systemctl enable -q --now "postgresql-${PG_VERSION}" 2>/dev/null || true
+  systemctl enable -q --now postgresql 2>/dev/null || true
+
+  if command -v pg_isready >/dev/null 2>&1; then
+    local i
+    for i in $(seq 1 30); do
+      pg_isready -q && { msg_ok "PostgreSQL is ready"; return 0; }
+      sleep 1
+    done
+    msg_err "PostgreSQL did not become ready in time"
+    exit 1
+  fi
+}
+
+tune_postgres_for_profile() {
+  if [[ "$RESOURCE_PROFILE" != "low" ]]; then
+    return 0
+  fi
+  local confdir
+  confdir="$(sudo -u postgres psql -tAc "SHOW config_file;" 2>/dev/null | xargs dirname || true)"
+  if [[ -n "$confdir" && -d "$confdir" ]]; then
+    cat >"${confdir}/conf.d/openarchiver-low-memory.conf" <<'EOF'
+# Open Archiver low-resource profile
+shared_buffers = 128MB
+max_connections = 50
+EOF
+    systemctl restart postgresql 2>/dev/null || \
+      systemctl restart "postgresql-${PG_VERSION}" 2>/dev/null || true
+    msg_ok "PostgreSQL tuned for low-memory profile"
+  fi
+}
+
+install_meili() {
+  local arch asset
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) asset="meilisearch-linux-amd64" ;;
+    aarch64|arm64) asset="meilisearch-linux-aarch64" ;;
+    *) msg_err "Unsupported architecture: $arch"; exit 1 ;;
+  esac
+
+  if [[ ! -x /usr/bin/meilisearch ]]; then
+    msg_info "Fetching Meilisearch ${MEILI_VERSION} for ${arch}"
+    curl -fsSL "https://github.com/meilisearch/meilisearch/releases/download/${MEILI_VERSION}/${asset}" -o /usr/bin/meilisearch
+    chmod +x /usr/bin/meilisearch
+    msg_ok "Meilisearch installed"
+  else
+    msg_info "Meilisearch binary present; skipping download"
+  fi
+
+  mkdir -p /var/lib/meilisearch/data /var/lib/meilisearch/dumps /var/lib/meilisearch/snapshots
+
+  local unit_path="/etc/systemd/system/meilisearch.service"
+  local cfg_path="/etc/meilisearch.toml"
+  curl -fsSL "https://raw.githubusercontent.com/meilisearch/meilisearch/${MEILI_VERSION}/config.toml" -o "$cfg_path"
+
+  sed -i \
+    -e 's|^env =.*|env = "production"|' \
+    -e "s|^# master_key =.*|master_key = \"${MEILI_MASTER_KEY}\"|" \
+    -e 's|^db_path =.*|db_path = "/var/lib/meilisearch/data"|' \
+    -e 's|^dump_dir =.*|dump_dir = "/var/lib/meilisearch/dumps"|' \
+    -e 's|^snapshot_dir =.*|snapshot_dir = "/var/lib/meilisearch/snapshots"|' \
+    -e 's|^# no_analytics = true|no_analytics = true|' \
+    -e 's|^http_addr =.*|http_addr = "127.0.0.1:7700"|' \
+    "$cfg_path"
+
+  local new_unit
+  new_unit=$(cat <<EOF
+[Unit]
+Description=Meilisearch
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/meilisearch --config-file-path ${cfg_path}
+Environment=MEILI_MAX_INDEXING_MEMORY=${MEILI_MAX_INDEXING_MEMORY}
+Environment=MEILI_MAX_INDEXING_THREADS=${MEILI_MAX_INDEXING_THREADS}
+Restart=always
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+  if [[ ! -f "$unit_path" ]] || [[ "$(cat "$unit_path")" != "$new_unit" ]]; then
+    echo "$new_unit" > "$unit_path"
+    systemctl daemon-reload
+  fi
+  systemctl enable -q --now meilisearch
+  systemctl restart meilisearch
+}
+
+install_tika() {
+  local TIKA_DIR="/opt/tika"
+  mkdir -p "$TIKA_DIR"
+  local jar="${TIKA_DIR}/tika-app.jar"
+  local url="https://dlcdn.apache.org/tika/${TIKA_VERSION}/tika-app-${TIKA_VERSION}.jar"
+
+  if [[ ! -f "$jar" ]]; then
+    msg_info "Downloading Apache Tika ${TIKA_VERSION}"
+    curl -fsSL "$url" -o "$jar"
+    msg_ok "Tika downloaded"
+  fi
+
+  local unit_path="/etc/systemd/system/tika.service"
+  local new_unit
+  new_unit=$(cat <<EOF
+[Unit]
+Description=Apache Tika Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${TIKA_DIR}
+ExecStart=/usr/bin/java -Xmx512m -jar ${jar} --host 127.0.0.1 --port 9998
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+  if [[ ! -f "$unit_path" ]] || [[ "$(cat "$unit_path")" != "$new_unit" ]]; then
+    echo "$new_unit" > "$unit_path"
+    systemctl daemon-reload
+  fi
+  systemctl enable -q --now tika
+  systemctl restart tika
+}
+
+disable_tika() {
+  systemctl disable -q tika 2>/dev/null || true
+  systemctl stop tika 2>/dev/null || true
+}
+
+health_checks() {
+  local ok=0
+  curl -sf http://127.0.0.1:7700/health >/dev/null \
+    && msg_ok "Meilisearch health: OK" \
+    || { msg_err "Meilisearch health: FAILED"; ok=1; }
+
+  if resolve_tika_install; then
+    curl -sf http://127.0.0.1:9998/version >/dev/null \
+      && msg_ok "Tika health: OK" \
+      || { msg_err "Tika health: FAILED"; ok=1; }
+  else
+    msg_info "Tika skipped (low-RAM profile). Set TIKA_URL after installing with --with-tika."
+  fi
+
+  return $ok
+}
+
+fetch_openarchiver() {
+  if [[ -d "${OA_DIR}/.git" ]]; then
+    msg_info "Updating Open Archiver from ${OA_REPO} (${OA_BRANCH})"
+    git -C "$OA_DIR" fetch origin "$OA_BRANCH"
+    git -C "$OA_DIR" reset --hard "origin/${OA_BRANCH}"
+  else
+    msg_info "Cloning Open Archiver fork from ${OA_REPO}"
+    rm -rf "$OA_DIR"
+    git clone --depth 1 --branch "$OA_BRANCH" "$OA_REPO" "$OA_DIR"
+  fi
+  msg_ok "Open Archiver source ready at ${OA_DIR}"
+}
+
+write_env_file() {
+  local tika_line=""
+  if resolve_tika_install; then
+    tika_line="TIKA_URL=http://127.0.0.1:9998"
+  else
+    tika_line="# TIKA_URL=   # optional — saves ~500 MB RAM; use --with-tika to enable"
+  fi
+
+  msg_info "Writing ${OA_DIR}/.env"
+  cat >"${OA_DIR}/.env" <<EOF
+# --- Application Settings (generated by open-mailarchiver-nolxc) ---
+NODE_ENV=production
+PORT_BACKEND=4000
+PORT_FRONTEND=3000
+APP_URL=http://${IP_ADDR}:3000
+ORIGIN=http://${IP_ADDR}:3000
+ALL_INCLUSIVE_ARCHIVE=false
+
+# Resource profile — tuned for this host (see docs/user-guides/low-resource-deployment.md)
+RESOURCE_PROFILE=${RESOURCE_PROFILE}
+NODE_MAX_OLD_SPACE_MB=${NODE_MAX_OLD_SPACE_MB}
+SYNC_FREQUENCY='${SYNC_FREQUENCY}'
+INGESTION_WORKER_CONCURRENCY=${INGESTION_WORKER_CONCURRENCY}
+INDEXING_WORKER_CONCURRENCY=${INDEXING_WORKER_CONCURRENCY}
+INDEXING_EMAIL_CONCURRENCY=${INDEXING_EMAIL_CONCURRENCY}
+INDEXING_ATTACHMENT_CONCURRENCY=${INDEXING_ATTACHMENT_CONCURRENCY}
+ATTACHMENT_STORAGE_CONCURRENCY=${ATTACHMENT_STORAGE_CONCURRENCY}
+
+# Backend binding
+BACKEND_HOST=0.0.0.0
+BACKEND_PORT=4000
+PORT=3000
+HOST=0.0.0.0
+PUBLIC_BACKEND_URL=http://127.0.0.1:4000
+VITE_PUBLIC_BACKEND_URL=http://127.0.0.1:4000
+API_URL=http://127.0.0.1:4000
+
+# PostgreSQL
+POSTGRES_DB=${POSTGRES_DB}
+POSTGRES_USER=${POSTGRES_USER}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+
+# Meilisearch
+MEILI_MASTER_KEY=${MEILI_MASTER_KEY}
+MEILI_HOST=http://127.0.0.1:7700
+MEILI_INDEXING_BATCH=${MEILI_INDEXING_BATCH}
+
+# Valkey (Redis-compatible)
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+REDIS_PASSWORD=${REDIS_PASSWORD}
+REDIS_TLS_ENABLED=false
+
+# Storage — use Local Path ingestion for large PST files on this host
+STORAGE_TYPE=local
+BODY_SIZE_LIMIT=Infinity
+STORAGE_LOCAL_ROOT_PATH=${OA_DATA}
+
+# S3 (unused when STORAGE_TYPE=local)
+STORAGE_S3_ENDPOINT=
+STORAGE_S3_BUCKET=
+STORAGE_S3_ACCESS_KEY_ID=
+STORAGE_S3_SECRET_ACCESS_KEY=
+STORAGE_S3_REGION=
+STORAGE_S3_FORCE_PATH_STYLE=false
+STORAGE_ENCRYPTION_KEY=
+
+# Security
+ENABLE_DELETION=false
+RATE_LIMIT_WINDOW_MS=60000
+RATE_LIMIT_MAX_REQUESTS=100
+JWT_SECRET=${JWT_SECRET}
+JWT_EXPIRES_IN="7d"
+ENCRYPTION_KEY=${ENCRYPTION_KEY}
+
+# Apache Tika (optional OCR for attachment search)
+${tika_line}
+EOF
+}
+
+build_openarchiver() {
+  mkdir -p "$OA_DATA"
+  cd "$OA_DIR"
+  pnpm install --shamefully-hoist --frozen-lockfile --prod=false
+  pnpm run build:oss
+  pnpm db:migrate
+  msg_ok "Open Archiver built and migrated"
+}
+
+create_systemd_service() {
+  local unit_path="/etc/systemd/system/openarchiver.service"
+  local new_unit
+  new_unit=$(cat <<EOF
+[Unit]
+Description=Open Archiver (jacksonm36/OpenArchiver_fork)
+After=network-online.target postgresql.service meilisearch.service valkey.service
+Wants=postgresql.service meilisearch.service valkey.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=${OA_DIR}
+EnvironmentFile=${OA_DIR}/.env
+Environment=NODE_OPTIONS=--max-old-space-size=${NODE_MAX_OLD_SPACE_MB}
+ExecStart=/usr/bin/pnpm docker-start:oss
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+)
+  if [[ ! -f "$unit_path" ]] || [[ "$(cat "$unit_path")" != "$new_unit" ]]; then
+    echo "$new_unit" > "$unit_path"
+    systemctl daemon-reload
+  fi
+  systemctl enable -q --now openarchiver
+  systemctl restart openarchiver
+  msg_ok "openarchiver.service started"
+}
+
+write_credentials_file() {
+  cat >~/openarchiver.creds <<EOF
+Open Archiver Credentials ($(date -Iseconds))
+============================================
+Web UI:        http://${IP_ADDR}:3000
+Install path:  ${OA_DIR}
+Data path:     ${OA_DATA}
+Resource prof: ${RESOURCE_PROFILE} (${total_ram_gb} GB RAM detected)
+
+PostgreSQL
+  Database: ${POSTGRES_DB}
+  User:     ${POSTGRES_USER}
+  Password: ${POSTGRES_PASSWORD}
+
+Meilisearch master key: ${MEILI_MASTER_KEY}
+Valkey password:        ${REDIS_PASSWORD}
+JWT secret:             ${JWT_SECRET}
+Encryption key:         ${ENCRYPTION_KEY}
+
+Tika OCR: $(resolve_tika_install && echo "enabled (http://127.0.0.1:9998)" || echo "disabled (low-RAM default)")
+
+PST tip: place files under ${OA_DATA}/temp/ and use Local Path ingestion.
+Docs:    ${OA_DIR}/docs/user-guides/low-resource-deployment.md
+EOF
+  chmod 600 ~/openarchiver.creds
+  msg_ok "Credentials written to ~/openarchiver.creds"
+}
+
+# --- main ---
+parse_args "$@"
+require_root
+detect_os
+
+IP_ADDR="$(hostname -I 2>/dev/null | awk '{print $1}')"
+[[ -z "$IP_ADDR" ]] && IP_ADDR="127.0.0.1"
+
+POSTGRES_DB="openarchiver_db"
+POSTGRES_USER="openarchiver"
+POSTGRES_PASSWORD="$(gen_alnum 18)"
+REDIS_PASSWORD="$(gen_alnum 24)"
+MEILI_MASTER_KEY="$(openssl rand -base64 18 2>/dev/null || gen_alnum 24)"
+JWT_SECRET="$(openssl rand -hex 32 2>/dev/null || gen_alnum 32)"
+ENCRYPTION_KEY="$(openssl rand -hex 32 2>/dev/null || gen_alnum 32)"
+
+detect_resource_profile
+
+if [[ "$UPDATE_ONLY" -eq 1 ]]; then
+  fetch_openarchiver
+  write_env_file
+  build_openarchiver
+  systemctl restart openarchiver
+  msg_ok "Update complete. Visit: http://${IP_ADDR}:3000"
+  exit 0
+fi
+
+install_base_packages
+install_valkey
+configure_valkey
+
+if resolve_tika_install; then
+  install_java_for_tika
+fi
+
+install_node
+install_postgres
+start_postgres
+tune_postgres_for_profile
+install_meili
+
+if resolve_tika_install; then
+  install_tika
+else
+  disable_tika
+  msg_info "Skipping Tika (RESOURCE_PROFILE=${RESOURCE_PROFILE}). Use --with-tika to enable OCR."
+fi
+
+msg_info "Configuring PostgreSQL role and database"
+sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" | grep -q 1 || \
+  sudo -u postgres psql -c "CREATE ROLE ${POSTGRES_USER} WITH LOGIN PASSWORD '${POSTGRES_PASSWORD}';"
+sudo -u postgres psql -c "ALTER ROLE ${POSTGRES_USER} WITH LOGIN PASSWORD '${POSTGRES_PASSWORD}';"
+sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" | grep -q 1 || \
+  sudo -u postgres psql -c "CREATE DATABASE ${POSTGRES_DB} WITH OWNER ${POSTGRES_USER} ENCODING 'UTF8' TEMPLATE template0;"
+sudo -u postgres psql -c "ALTER DATABASE ${POSTGRES_DB} OWNER TO ${POSTGRES_USER};"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${POSTGRES_DB} TO ${POSTGRES_USER};"
+sudo -u postgres psql -d "${POSTGRES_DB}" -c "GRANT ALL PRIVILEGES ON SCHEMA public TO ${POSTGRES_USER};"
+msg_ok "PostgreSQL configured"
+
+fetch_openarchiver
+write_env_file
+build_openarchiver
+create_systemd_service
+write_credentials_file
+
+msg_info "Running health checks"
+if health_checks; then
+  msg_ok "All health checks passed."
+else
+  msg_warn "Some health checks failed — review journalctl -u meilisearch -u tika -u openarchiver"
+fi
+
+msg_ok "Installation complete."
+echo ""
+echo "  Web UI:  http://${IP_ADDR}:3000"
+echo "  Profile: ${RESOURCE_PROFILE} (${total_ram_gb} GB RAM, $(cpu_count) CPUs)"
+echo "  Creds:   ~/openarchiver.creds"
+echo ""
+echo "  Update later:  sudo bash $0 --update"
+echo "  Enable OCR:    sudo bash $0 --with-tika --update"

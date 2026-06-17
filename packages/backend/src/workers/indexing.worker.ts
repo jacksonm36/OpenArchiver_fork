@@ -1,5 +1,6 @@
 import { Worker } from 'bullmq';
 import { connection } from '../config/redis';
+import { config } from '../config';
 import indexEmailBatchProcessor from '../jobs/processors/index-email-batch.processor';
 import { logger } from '../config/logger';
 
@@ -14,6 +15,7 @@ const processor = async (job: any) => {
 
 const worker = new Worker('indexing', processor, {
 	connection,
+	concurrency: config.resources.indexingWorkerConcurrency,
 	removeOnComplete: {
 		count: 100, // keep last 100 jobs
 	},
@@ -22,7 +24,14 @@ const worker = new Worker('indexing', processor, {
 	},
 });
 
-logger.info('Indexing worker started');
+logger.info(
+	{
+		resourceProfile: config.resources.profile,
+		concurrency: config.resources.indexingWorkerConcurrency,
+		indexingBatchSize: config.resources.indexingBatchSize,
+	},
+	'Indexing worker started'
+);
 
 process.on('SIGINT', () => worker.close());
 process.on('SIGTERM', () => worker.close());

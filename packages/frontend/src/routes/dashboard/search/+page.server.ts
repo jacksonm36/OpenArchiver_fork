@@ -1,50 +1,68 @@
 import type { PageServerLoad, RequestEvent } from './$types';
 import { api } from '$lib/server/api';
 import type { SearchResult } from '@open-archiver/types';
+import {
+	buildSearchQueryString,
+	hasActiveSearch,
+	parseSearchParams,
+	type SearchFormState,
+} from '$lib/searchParams';
 
-import type { MatchingStrategy } from '@open-archiver/types';
-
-async function performSearch(
-	keywords: string,
-	page: number,
-	matchingStrategy: MatchingStrategy,
-	event: RequestEvent
-) {
-	if (!keywords) {
-		return { searchResult: null, keywords: '', page: 1, matchingStrategy: 'last' };
+async function performSearch(state: SearchFormState, event: RequestEvent) {
+	if (!hasActiveSearch(state)) {
+		return {
+			searchResult: null,
+			...state,
+		};
 	}
 
 	try {
-		const response = await api(
-			`/search?keywords=${keywords}&page=${page}&limit=10&matchingStrategy=${matchingStrategy}`,
-			event,
-			{
-				method: 'GET',
-			}
-		);
+		const queryString = buildSearchQueryString({ ...state, page: state.page });
+		const searchResponse = await api(`/search?${queryString}&limit=10`, event, { method: 'GET' });
 
-		if (!response.ok) {
-			const error = await response.json();
-			return { searchResult: null, keywords, page, matchingStrategy, error: error.message };
+		if (!searchResponse.ok) {
+			const error = await searchResponse.json();
+			return {
+				searchResult: null,
+				...state,
+				error: error.message,
+			};
 		}
 
-		const searchResult = (await response.json()) as SearchResult;
-		return { searchResult, keywords, page, matchingStrategy };
+		const searchResult = (await searchResponse.json()) as SearchResult;
+		return { searchResult, ...state };
 	} catch (error) {
 		return {
 			searchResult: null,
-			keywords,
-			page,
-			matchingStrategy,
+			...state,
 			error: error instanceof Error ? error.message : 'Unknown error',
 		};
 	}
 }
 
 export const load: PageServerLoad = async (event) => {
-	const keywords = event.url.searchParams.get('keywords') || '';
-	const page = parseInt(event.url.searchParams.get('page') || '1');
-	const matchingStrategy = (event.url.searchParams.get('matchingStrategy') ||
-		'last') as MatchingStrategy;
-	return performSearch(keywords, page, matchingStrategy, event);
+	const state = parseSearchParams(event.url);
+
+	try {
+		const tagsResponse = await api('/search/tags', event, { method: 'GET' });
+		let availableTags: string[] = [];
+		if (tagsResponse.ok) {
+			const tagsBody = await tagsResponse.json();
+			availableTags = tagsBody.tags ?? [];
+		}
+
+		if (!hasActiveSearch(state)) {
+			return { ...state, searchResult: null, availableTags };
+		}
+
+		const result = await performSearch(state, event);
+		return { ...result, availableTags: result.availableTags ?? availableTags };
+	} catch (error) {
+		return {
+			...state,
+			searchResult: null,
+			availableTags: [],
+			error: error instanceof Error ? error.message : 'Unknown error',
+		};
+	}
 };

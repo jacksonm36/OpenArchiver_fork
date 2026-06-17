@@ -202,6 +202,20 @@ export class IngestionController {
 		}
 	};
 
+	public getDiagnostics = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { id } = req.params;
+			const diagnostics = await IngestionService.getDiagnostics(id);
+			return res.status(200).json(diagnostics);
+		} catch (error) {
+			logger.error({ err: error }, `Get diagnostics for ${req.params.id} error`);
+			if (error instanceof Error && error.message === 'Ingestion source not found') {
+				return res.status(404).json({ message: req.t('ingestion.notFound') });
+			}
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
 	public triggerForceSync = async (req: Request, res: Response): Promise<Response> => {
 		try {
 			const { id } = req.params;

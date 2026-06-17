@@ -35,6 +35,10 @@ export default defineConfig({
 				items: [
 					{ text: 'Get Started', link: '/' },
 					{ text: 'Installation', link: '/user-guides/installation' },
+					{
+						text: 'Low-Resource Deployment',
+						link: '/user-guides/low-resource-deployment',
+					},
 					{ text: 'Email Integrity Check', link: '/user-guides/integrity-check' },
 					{
 						text: 'Email Providers',

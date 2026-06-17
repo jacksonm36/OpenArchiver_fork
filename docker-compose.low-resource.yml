@@ -1,0 +1,54 @@
+# Low-resource overlay for ~6 GB RAM / 4 CPU cores.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.low-resource.yml up -d
+#
+# This file sets conservative memory limits and application tuning so Open Archiver
+# can run alongside PostgreSQL, Valkey, and Meilisearch on a small VPS.
+# Apache Tika (OCR) is disabled by default — enable with: --profile ocr
+
+services:
+    open-archiver:
+        environment:
+            RESOURCE_PROFILE: low
+            NODE_MAX_OLD_SPACE_MB: 1024
+            TIKA_URL: ''
+        deploy:
+            resources:
+                limits:
+                    memory: 2G
+
+    postgres:
+        command: postgres -c shared_buffers=128MB -c max_connections=50
+        deploy:
+            resources:
+                limits:
+                    memory: 768M
+
+    valkey:
+        command: >
+            valkey-server
+            --requirepass ${REDIS_PASSWORD}
+            --maxmemory 128mb
+            --maxmemory-policy allkeys-lru
+        deploy:
+            resources:
+                limits:
+                    memory: 256M
+
+    meilisearch:
+        environment:
+            MEILI_MAX_INDEXING_MEMORY: 384MiB
+            MEILI_MAX_INDEXING_THREADS: 2
+        deploy:
+            resources:
+                limits:
+                    memory: 768M
+
+    tika:
+        profiles:
+            - ocr
+        deploy:
+            resources:
+                limits:
+                    memory: 512M

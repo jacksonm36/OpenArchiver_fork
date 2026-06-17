@@ -164,6 +164,14 @@ export async function createServer(modules: ArchiverModule[] = []): Promise<Expr
 		res.send('Backend is running!!');
 	});
 	logger.info('✅ Core OSS modules loaded.');
+	logger.info(
+		{
+			resourceProfile: config.resources.profile,
+			indexingBatchSize: config.resources.indexingBatchSize,
+			syncFrequency: config.app.syncFrequency,
+		},
+		'Resource profile active'
+	);
 
 	return app;
 }

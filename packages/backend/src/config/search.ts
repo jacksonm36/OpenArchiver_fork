@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { resources } from './resources';
 
 export const searchConfig = {
 	host: process.env.MEILI_HOST || 'http://127.0.0.1:7700',
@@ -6,7 +7,5 @@ export const searchConfig = {
 };
 
 export const meiliConfig = {
-	indexingBatchSize: process.env.MEILI_INDEXING_BATCH
-		? parseInt(process.env.MEILI_INDEXING_BATCH)
-		: 500,
+	indexingBatchSize: resources.indexingBatchSize,
 };

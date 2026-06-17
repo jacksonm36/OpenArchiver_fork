@@ -3,16 +3,17 @@
 	import * as Table from '$lib/components/ui/table';
 	import { Button } from '$lib/components/ui/button';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { MoreHorizontal, Trash, RefreshCw, ChevronRight } from 'lucide-svelte';
+	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, Activity } from 'lucide-svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import IngestionSourceForm from '$lib/components/custom/IngestionSourceForm.svelte';
+	import IngestionDiagnosticsDialog from '$lib/components/custom/IngestionDiagnosticsDialog.svelte';
+	import IngestionProgressCell from '$lib/components/custom/IngestionProgressCell.svelte';
 	import { api } from '$lib/api.client';
-	import type { SafeIngestionSource, CreateIngestionSourceDto } from '@open-archiver/types';
-	import Badge from '$lib/components/ui/badge/badge.svelte';
+	import type { SafeIngestionSource, CreateIngestionSourceDto, IngestionDiagnostics } from '@open-archiver/types';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
-	import * as HoverCard from '$lib/components/ui/hover-card/index.js';
+	import { onDestroy } from 'svelte';
 	import { t } from '$lib/translations';
 
 	let { data }: { data: PageData } = $props();
@@ -29,6 +30,65 @@
 	let isUnmerging = $state(false);
 	/** Tracks which root source groups are expanded in the table */
 	let expandedGroups = $state<Set<string>>(new Set());
+	let diagnosticsBySourceId = $state<Record<string, IngestionDiagnostics>>({});
+	let diagnosticsSource = $state<SafeIngestionSource | null>(null);
+	let isDiagnosticsOpen = $state(false);
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+	const activeSourceIds = $derived(
+		ingestionSources
+			.filter((s) => ['importing', 'syncing', 'error'].includes(s.status))
+			.map((s) => s.id)
+	);
+
+	async function fetchDiagnosticsForSources(ids: string[]) {
+		const entries = await Promise.all(
+			ids.map(async (id) => {
+				const res = await api(`/ingestion-sources/${id}/diagnostics`);
+				if (!res.ok) return null;
+				return [id, (await res.json()) as IngestionDiagnostics] as const;
+			})
+		);
+		const next = { ...diagnosticsBySourceId };
+		for (const entry of entries) {
+			if (entry) next[entry[0]] = entry[1];
+		}
+		diagnosticsBySourceId = next;
+	}
+
+	async function refreshSourcesAndDiagnostics() {
+		const res = await api('/ingestion-sources');
+		if (res.ok) {
+			ingestionSources = await res.json();
+		}
+		const idsToPoll = ingestionSources
+			.filter((s) => ['importing', 'syncing', 'error'].includes(s.status))
+			.map((s) => s.id);
+		if (idsToPoll.length > 0) {
+			await fetchDiagnosticsForSources(idsToPoll);
+		}
+	}
+
+	$effect(() => {
+		if (activeSourceIds.length > 0) {
+			if (!pollTimer) {
+				refreshSourcesAndDiagnostics();
+				pollTimer = setInterval(refreshSourcesAndDiagnostics, 4000);
+			}
+		} else if (pollTimer) {
+			clearInterval(pollTimer);
+			pollTimer = null;
+		}
+	});
+
+	onDestroy(() => {
+		if (pollTimer) clearInterval(pollTimer);
+	});
+
+	const openDiagnostics = (source: SafeIngestionSource) => {
+		diagnosticsSource = source;
+		isDiagnosticsOpen = true;
+	};
 
 	// Group sources: roots (mergedIntoId is null/undefined) and their children
 	const rootSources = $derived(ingestionSources.filter((s) => !s.mergedIntoId));
@@ -489,27 +549,12 @@
 							<Table.Cell class="capitalize"
 								>{source.provider.split('_').join(' ')}</Table.Cell
 							>
-							<Table.Cell class="min-w-24">
-								<HoverCard.Root>
-									<HoverCard.Trigger>
-										<Badge
-											class="{getStatusClasses(
-												displayStatus
-											)} cursor-pointer capitalize"
-										>
-											{displayStatus.split('_').join(' ')}
-										</Badge>
-									</HoverCard.Trigger>
-									<HoverCard.Content class="{getStatusClasses(displayStatus)} ">
-										<div class="flex flex-col space-y-4 text-sm">
-											<p class=" font-mono">
-												<b>{$t('app.ingestions.last_sync_message')}:</b>
-												{source.lastSyncStatusMessage ||
-													$t('app.ingestions.empty')}
-											</p>
-										</div>
-									</HoverCard.Content>
-								</HoverCard.Root>
+							<Table.Cell class="min-w-32">
+								<IngestionProgressCell
+									status={displayStatus}
+									diagnostics={diagnosticsBySourceId[source.id] ?? null}
+									{getStatusClasses}
+								/>
 							</Table.Cell>
 							<Table.Cell>
 								<Switch
@@ -523,7 +568,17 @@
 								>{new Date(source.createdAt).toLocaleDateString()}</Table.Cell
 							>
 							<Table.Cell class="text-right">
-								<DropdownMenu.Root>
+								<div class="flex items-center justify-end gap-1">
+									<Button
+										variant="ghost"
+										size="icon"
+										class="h-8 w-8"
+										title={$t('app.ingestions.diagnostics_title')}
+										onclick={() => openDiagnostics(source)}
+									>
+										<Activity class="h-4 w-4" />
+									</Button>
+									<DropdownMenu.Root>
 									<DropdownMenu.Trigger>
 										{#snippet child({ props })}
 											<Button {...props} variant="ghost" class="h-8 w-8 p-0">
@@ -541,6 +596,9 @@
 										<DropdownMenu.Item onclick={() => openEditDialog(source)}
 											>{$t('app.ingestions.edit')}</DropdownMenu.Item
 										>
+										<DropdownMenu.Item onclick={() => openDiagnostics(source)}
+											>{$t('app.ingestions.view_diagnostics')}</DropdownMenu.Item
+										>
 										<DropdownMenu.Item onclick={() => handleSync(source.id)}
 											>{$t('app.ingestions.force_sync')}</DropdownMenu.Item
 										>
@@ -552,6 +610,7 @@
 										>
 									</DropdownMenu.Content>
 								</DropdownMenu.Root>
+								</div>
 							</Table.Cell>
 						</Table.Row>
 
@@ -576,33 +635,12 @@
 									<Table.Cell class="capitalize"
 										>{child.provider.split('_').join(' ')}</Table.Cell
 									>
-									<Table.Cell class="min-w-24">
-										<HoverCard.Root>
-											<HoverCard.Trigger>
-												<Badge
-													class="{getStatusClasses(
-														child.status
-													)} cursor-pointer capitalize"
-												>
-													{child.status.split('_').join(' ')}
-												</Badge>
-											</HoverCard.Trigger>
-											<HoverCard.Content
-												class="{getStatusClasses(child.status)} "
-											>
-												<div class="flex flex-col space-y-4 text-sm">
-													<p class=" font-mono">
-														<b
-															>{$t(
-																'app.ingestions.last_sync_message'
-															)}:</b
-														>
-														{child.lastSyncStatusMessage ||
-															$t('app.ingestions.empty')}
-													</p>
-												</div>
-											</HoverCard.Content>
-										</HoverCard.Root>
+									<Table.Cell class="min-w-32">
+										<IngestionProgressCell
+											status={child.status}
+											diagnostics={diagnosticsBySourceId[child.id] ?? null}
+											{getStatusClasses}
+										/>
 									</Table.Cell>
 									<Table.Cell>
 										<Switch
@@ -618,7 +656,17 @@
 										).toLocaleDateString()}</Table.Cell
 									>
 									<Table.Cell class="text-right">
-										<DropdownMenu.Root>
+										<div class="flex items-center justify-end gap-1">
+											<Button
+												variant="ghost"
+												size="icon"
+												class="h-8 w-8"
+												title={$t('app.ingestions.diagnostics_title')}
+												onclick={() => openDiagnostics(child)}
+											>
+												<Activity class="h-4 w-4" />
+											</Button>
+											<DropdownMenu.Root>
 											<DropdownMenu.Trigger>
 												{#snippet child({ props })}
 													<Button
@@ -644,6 +692,10 @@
 													>{$t('app.ingestions.edit')}</DropdownMenu.Item
 												>
 												<DropdownMenu.Item
+													onclick={() => openDiagnostics(child)}
+													>{$t('app.ingestions.view_diagnostics')}</DropdownMenu.Item
+												>
+												<DropdownMenu.Item
 													onclick={() => handleSync(child.id)}
 													>{$t(
 														'app.ingestions.force_sync'
@@ -664,6 +716,7 @@
 												>
 											</DropdownMenu.Content>
 										</DropdownMenu.Root>
+										</div>
 									</Table.Cell>
 								</Table.Row>
 							{/each}
@@ -713,7 +766,6 @@
 		/>
 	</Dialog.Content>
 </Dialog.Root>
-
 <Dialog.Root bind:open={isDeleteDialogOpen}>
 	<Dialog.Content class="sm:max-w-lg">
 		<Dialog.Header>
@@ -747,7 +799,6 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
-
 <Dialog.Root bind:open={isBulkDeleteDialogOpen}>
 	<Dialog.Content class="sm:max-w-lg">
 		<Dialog.Header>
@@ -778,7 +829,6 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
-
 <!-- Unmerge confirmation modal -->
 <Dialog.Root bind:open={isUnmergeDialogOpen}>
 	<Dialog.Content class="sm:max-w-lg">
@@ -806,3 +856,5 @@
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>
+
+<IngestionDiagnosticsDialog source={diagnosticsSource} bind:open={isDiagnosticsOpen} />

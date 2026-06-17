@@ -73,15 +73,16 @@ Open Archiver is built on a modern, scalable, and maintainable technology stack:
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
-- A server or local machine with at least 4GB of RAM (2GB of RAM if you use external Postgres, Redis (Valkey) and Meilisearch instances).
+- A server or local machine with at least **6 GB of RAM** and **4 CPU cores** for the full Docker stack. For small VPS instances, use the [low-resource deployment guide](docs/user-guides/low-resource-deployment.md) with `docker-compose.low-resource.yml`.
+- 2 GB of RAM if you use external Postgres, Redis (Valkey), and Meilisearch instances.
 
-### Installation
+### Installation (Docker)
 
 1.  **Clone the repository:**
 
     ```bash
-    git clone https://github.com/LogicLabs-OU/OpenArchiver.git
-    cd OpenArchiver
+    git clone https://github.com/jacksonm36/OpenArchiver_fork.git
+    cd OpenArchiver_fork
     ```
 
 2.  **Configure your environment:**
@@ -91,15 +92,31 @@ Open Archiver is built on a modern, scalable, and maintainable technology stack:
     cp .env.example .env
     ```
 
-    You will need to edit the `.env` file to set your admin passwords, secret keys, and other essential configuration. Read the .env.example for how to set up.
+    You will need to edit the `.env` file to set your admin passwords, secret keys, and other essential configuration. Read the `.env.example` for how to set up.
 
 3.  **Run the application:**
 
     ```bash
+    # Standard install
     docker compose up -d
+
+    # Low-resource VPS (~6 GB RAM / 4 cores)
+    docker compose -f docker-compose.yml -f docker-compose.low-resource.yml up -d
     ```
 
-    This command will pull the pre-built Docker images and start all the services (frontend, backend, database, etc.) in the background.
+    This command will start all services (frontend, backend, database, etc.) in the background.
+
+### Installation (bare metal, no Docker)
+
+For Debian/Ubuntu or RHEL/Fedora without containers:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jacksonm36/install-scripts/main/open-mailarchiver-nolxc | sudo bash
+```
+
+Or run from this repo: `sudo bash scripts/install/open-mailarchiver-nolxc`
+
+The installer clones this fork, detects RAM/CPU, applies a resource profile, and configures systemd services. See [scripts/install/README.md](scripts/install/README.md).
 
 4.  **Access the application:**
     Once the services are running, you can access the Open Archiver web interface by navigating to `http://localhost:3000` in your web browser.

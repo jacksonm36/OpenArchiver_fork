@@ -10,31 +10,21 @@ const handleRequest: RequestHandler = async ({ request, params, fetch }) => {
 	const targetUrl = `${BACKEND_URL}/${slug}${url.search}`;
 
 	try {
-		let body: ArrayBuffer | null = null;
 		const headers = new Headers(request.headers);
-
-		if (request.method !== 'GET' && request.method !== 'HEAD') {
-			body = await request.arrayBuffer();
-			if (body.byteLength > 0) {
-				headers.set('Content-Length', String(body.byteLength));
-			}
-		}
+		// Stream the request body for large uploads (PST files) instead of buffering in memory.
+		const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
 
 		const proxyRequest = new Request(targetUrl, {
 			method: request.method,
-			headers: headers,
-			body: body,
-			duplex: 'half',
+			headers,
+			body: hasBody ? request.body : null,
+			duplex: hasBody ? 'half' : undefined,
 		} as RequestInit);
 
-		const response = await fetch(proxyRequest);
-
-		return response;
+		return await fetch(proxyRequest);
 	} catch (error: any) {
 		console.error('Proxy request failed:', error);
 
-		// Handle SvelteKit HttpError (e.g. from request.arrayBuffer() exceeding BODY_SIZE_LIMIT)
-		// Or other types of errors, formatting them into the standard ApiErrorResponse
 		const statusCode = error?.status || 500;
 		const message =
 			error?.body?.message || error?.message || 'Failed to connect to the backend service.';

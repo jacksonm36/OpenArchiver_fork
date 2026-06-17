@@ -75,6 +75,7 @@ export const createSearchRouter = (
 	 *         $ref: '#/components/responses/InternalServerError'
 	 */
 	router.get('/', requirePermission('search', 'archive'), searchController.search);
+	router.get('/tags', requirePermission('search', 'archive'), searchController.getTags);
 
 	return router;
 };

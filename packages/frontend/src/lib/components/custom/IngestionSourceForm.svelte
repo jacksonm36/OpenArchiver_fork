@@ -10,7 +10,8 @@
 	import * as RadioGroup from '$lib/components/ui/radio-group/index.js';
 	import { Textarea } from '$lib/components/ui/textarea/index.js';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
-	import { api } from '$lib/api.client';
+	import { uploadFileWithProgress, formatUploadBytes } from '$lib/upload.client';
+	import { Progress } from '$lib/components/ui/progress';
 	import { Loader2, Info, ChevronDown } from 'lucide-svelte';
 	import tippy from 'tippy.js';
 	import 'tippy.js/dist/tippy.css';
@@ -78,8 +79,15 @@
 
 	let isSubmitting = $state(false);
 	let fileUploading = $state(false);
+	let uploadProgress = $state<{ percent: number; loaded: number; total: number } | null>(null);
 	let showAdvanced = $state(false);
 	let mergeEnabled = $state(false);
+
+	$effect(() => {
+		if (!source && formData.provider === 'pst_import') {
+			importMethod = 'local';
+		}
+	});
 
 	/** When merge is toggled off, clear the mergedIntoId */
 	$effect(() => {
@@ -118,35 +126,17 @@
 	const handleFileChange = async (event: Event) => {
 		const target = event.target as HTMLInputElement;
 		const file = target.files?.[0];
-		fileUploading = true;
 		if (!file) {
-			fileUploading = false;
 			return;
 		}
 
-		const uploadFormData = new FormData();
-		uploadFormData.append('file', file);
+		fileUploading = true;
+		uploadProgress = { percent: 0, loaded: 0, total: file.size };
 
 		try {
-			const response = await api('/upload', {
-				method: 'POST',
-				body: uploadFormData,
+			const result = await uploadFileWithProgress(file, (progress) => {
+				uploadProgress = progress;
 			});
-
-			// Safely parse the response body — it may not be valid JSON
-			// (e.g. if the proxy rejected the request with an HTML error page)
-			let result: Record<string, string>;
-			try {
-				result = await response.json();
-			} catch {
-				throw new Error($t('app.components.ingestion_source_form.upload_network_error'));
-			}
-
-			if (!response.ok) {
-				throw new Error(
-					result.message || $t('app.components.ingestion_source_form.upload_failed')
-				);
-			}
 
 			formData.providerConfig.uploadedFilePath = result.filePath;
 			formData.providerConfig.uploadedFileName = file.name;
@@ -156,13 +146,13 @@
 				type: 'error',
 				title: $t('app.components.ingestion_source_form.upload_failed'),
 				message,
-				duration: 5000,
+				duration: 8000,
 				show: true,
 			});
-			// Reset file input so the user can retry with the same file
 			target.value = '';
 		} finally {
 			fileUploading = false;
+			uploadProgress = null;
 		}
 	};
 
@@ -316,17 +306,34 @@
 				<Label for="pst-file" class="text-left"
 					>{$t('app.components.ingestion_source_form.pst_file')}</Label
 				>
-				<div class="col-span-3 flex flex-row items-center space-x-2">
-					<Input
-						id="pst-file"
-						type="file"
-						class=""
-						accept=".pst"
-						onchange={handleFileChange}
-					/>
-					{#if fileUploading}
-						<span class=" text-primary animate-spin"><Loader2 /></span>
+				<div class="col-span-3 space-y-2">
+					<div class="flex flex-row items-center space-x-2">
+						<Input
+							id="pst-file"
+							type="file"
+							accept=".pst"
+							onchange={handleFileChange}
+							disabled={fileUploading}
+						/>
+						{#if fileUploading}
+							<span class="text-primary animate-spin"><Loader2 /></span>
+						{/if}
+					</div>
+					{#if uploadProgress}
+						<div class="space-y-1">
+							<Progress value={uploadProgress.percent} class="h-2" />
+							<p class="text-muted-foreground text-xs">
+								{$t('app.components.ingestion_source_form.upload_progress', {
+									percent: uploadProgress.percent,
+									loaded: formatUploadBytes(uploadProgress.loaded),
+									total: formatUploadBytes(uploadProgress.total),
+								})}
+							</p>
+						</div>
 					{/if}
+					<p class="text-muted-foreground text-xs">
+						{$t('app.components.ingestion_source_form.pst_large_file_hint')}
+					</p>
 				</div>
 			</div>
 		{:else}

@@ -17,6 +17,18 @@ export interface EmailAttachment {
 }
 
 /**
+ * Pre-computed fields passed from ingestion to indexing to avoid re-reading and re-parsing stored EML.
+ */
+export interface IndexingHint {
+	body: string;
+	subject: string;
+	from: string;
+	to: string[];
+	cc: string[];
+	bcc: string[];
+}
+
+/**
  * Describes the universal structure for a raw email object, designed to be compatible with various ingestion sources like IMAP and Google Workspace.
  * This type serves as a standardized representation of an email before it is processed and stored in the database.
  */
@@ -49,6 +61,8 @@ export interface EmailObject {
 	 * Connectors write the raw email to tmpdir() and pass only the path,
 	 * keeping large buffers off the JS heap between yield and processEmail(). */
 	tempFilePath: string;
+	/** When true, the temp EML file has no non-inline attachments and stripAttachmentsFromEml can be skipped. */
+	emlAttachmentsStripped?: boolean;
 	/** The email address of the user whose mailbox this email belongs to. */
 	userEmail?: string;
 	/** The folder path of the email in the source mailbox. */
@@ -59,7 +73,6 @@ export interface EmailObject {
 
 /**
  * Represents an email that has been processed and is ready for indexing.
- * Represents an email that has been processed and is ready for indexing.
  * This interface defines the shape of the data that is passed to the batch indexing function.
  */
 export interface PendingEmail {
@@ -67,6 +80,8 @@ export interface PendingEmail {
 	 * This ID is used to retrieve the full email data from the database and storage for indexing.
 	 */
 	archivedEmailId: string;
+	/** Optional pre-computed search fields to skip EML re-parse during indexing. */
+	indexingHint?: IndexingHint;
 }
 
 // Define the structure of the document to be indexed in Meilisearch
@@ -85,5 +100,8 @@ export interface EmailDocument {
 	}[];
 	timestamp: number;
 	ingestionSourceId: string;
+	/** Gmail labels / provider tags. */
+	tags?: string[];
+	hasAttachments?: boolean;
 	// other metadata
 }

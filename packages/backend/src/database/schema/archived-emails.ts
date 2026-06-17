@@ -34,6 +34,7 @@ export const archivedEmails = pgTable(
 	(table) => [
 		index('thread_id_idx').on(table.threadId),
 		index('provider_msg_source_idx').on(table.providerMessageId, table.ingestionSourceId),
+		index('msgid_header_source_idx').on(table.messageIdHeader, table.ingestionSourceId),
 	]
 );
 

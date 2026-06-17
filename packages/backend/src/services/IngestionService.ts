@@ -7,11 +7,13 @@ import type {
 	IngestionCredentials,
 	IngestionProvider,
 	PendingEmail,
+	IndexingHint,
+	IngestionDiagnostics,
 } from '@open-archiver/types';
-import { and, desc, eq, inArray, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, count } from 'drizzle-orm';
 import { CryptoService } from './CryptoService';
 import { EmailProviderFactory } from './EmailProviderFactory';
-import { ingestionQueue } from '../jobs/queues';
+import { ingestionQueue, indexingQueue } from '../jobs/queues';
 import type { JobType } from 'bullmq';
 import { StorageService } from './StorageService';
 import type { IInitialImportJob, EmailObject } from '@open-archiver/types';
@@ -30,6 +32,26 @@ import { FilterBuilder } from './FilterBuilder';
 import { AuditService } from './AuditService';
 import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
+import { mapWithConcurrency } from '../helpers/parallel';
+import { SyncSessionService } from './SyncSessionService';
+
+function buildIndexingHint(email: EmailObject): IndexingHint | undefined {
+	const body = email.body || email.html || '';
+	// Only skip the indexing re-parse when the connector already extracted searchable text
+	// (e.g. PST fast path). Other connectors may only have content in the temp EML file.
+	if (!body && !email.emlAttachmentsStripped) {
+		return undefined;
+	}
+
+	return {
+		body,
+		subject: email.subject || '',
+		from: email.from[0]?.address || '',
+		to: email.to?.map((address) => address.address) || [],
+		cc: email.cc?.map((address) => address.address) || [],
+		bcc: email.bcc?.map((address) => address.address) || [],
+	};
+}
 
 export class IngestionService {
 	private static auditService = new AuditService();
@@ -565,6 +587,7 @@ export class IngestionService {
 
 			const existingEmail = await db.query.archivedEmails.findFirst({
 				where: and(eq(archivedEmails.messageIdHeader, messageId), groupSourceFilter),
+				columns: { id: true },
 			});
 
 			if (existingEmail) {
@@ -634,14 +657,19 @@ export class IngestionService {
 					})
 					.returning();
 
+				const indexingHint = buildIndexingHint(email);
 				return {
 					archivedEmailId: archivedEmail.id,
+					...(indexingHint ? { indexingHint } : {}),
 				};
 			}
 
 			// Default mode: strip non-inline attachments from the .eml to avoid double-storing
-			// attachment data (attachments are stored separately).
-			const emlBuffer = await stripAttachmentsFromEml(rawEmlBuffer);
+			// attachment data (attachments are stored separately). Connectors that already
+			// wrote a body-only EML (e.g. PST fast path) skip the extra mailparser pass.
+			const emlBuffer = email.emlAttachmentsStripped
+				? rawEmlBuffer
+				: await stripAttachmentsFromEml(rawEmlBuffer);
 			const emailHash = createHash('sha256').update(emlBuffer).digest('hex');
 			await storage.put(emailPath, emlBuffer);
 
@@ -673,66 +701,68 @@ export class IngestionService {
 				.returning();
 
 			if (email.attachments.length > 0) {
-				for (const attachment of email.attachments) {
-					const attachmentBuffer = attachment.content;
-					const attachmentHash = createHash('sha256')
-						.update(attachmentBuffer)
-						.digest('hex');
+				await mapWithConcurrency(
+					email.attachments,
+					config.resources.attachmentStorageConcurrency,
+					async (attachment) => {
+						const attachmentBuffer = attachment.content;
+						const attachmentHash = createHash('sha256')
+							.update(attachmentBuffer)
+							.digest('hex');
 
-					// Check if an attachment with the same hash already exists for the root source
-					const existingAttachment = await db.query.attachments.findFirst({
-						where: and(
-							eq(attachmentsSchema.contentHashSha256, attachmentHash),
-							eq(attachmentsSchema.ingestionSourceId, effectiveSource.id)
-						),
-					});
+						const existingAttachment = await db.query.attachments.findFirst({
+							where: and(
+								eq(attachmentsSchema.contentHashSha256, attachmentHash),
+								eq(attachmentsSchema.ingestionSourceId, effectiveSource.id)
+							),
+						});
 
-					let attachmentId: string;
+						let attachmentId: string;
 
-					if (existingAttachment) {
-						attachmentId = existingAttachment.id;
-						logger.info(
-							{
-								attachmentHash,
-								ingestionSourceId: effectiveSource.id,
-								reusedPath: existingAttachment.storagePath,
-							},
-							'Reusing existing attachment file for deduplication.'
-						);
-					} else {
-						// New attachment: store under the root source's folder
-						const uniqueId = randomUUID().slice(0, 7);
-						const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
-						await storage.put(storagePath, attachmentBuffer);
+						if (existingAttachment) {
+							attachmentId = existingAttachment.id;
+							logger.info(
+								{
+									attachmentHash,
+									ingestionSourceId: effectiveSource.id,
+									reusedPath: existingAttachment.storagePath,
+								},
+								'Reusing existing attachment file for deduplication.'
+							);
+						} else {
+							const uniqueId = randomUUID().slice(0, 7);
+							const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
+							await storage.put(storagePath, attachmentBuffer);
 
-						const [newRecord] = await db
-							.insert(attachmentsSchema)
+							const [newRecord] = await db
+								.insert(attachmentsSchema)
+								.values({
+									filename: attachment.filename,
+									mimeType: attachment.contentType,
+									sizeBytes: attachment.size,
+									contentHashSha256: attachmentHash,
+									storagePath,
+									ingestionSourceId: effectiveSource.id,
+								})
+								.returning();
+							attachmentId = newRecord.id;
+						}
+
+						await db
+							.insert(emailAttachments)
 							.values({
-								filename: attachment.filename,
-								mimeType: attachment.contentType,
-								sizeBytes: attachment.size,
-								contentHashSha256: attachmentHash,
-								storagePath,
-								// Always assign attachment ownership to root (effectiveSource)
-								ingestionSourceId: effectiveSource.id,
+								emailId: archivedEmail.id,
+								attachmentId,
 							})
-							.returning();
-						attachmentId = newRecord.id;
+							.onConflictDoNothing();
 					}
-
-					// Link the attachment record (either new or existing) to the email
-					await db
-						.insert(emailAttachments)
-						.values({
-							emailId: archivedEmail.id,
-							attachmentId,
-						})
-						.onConflictDoNothing();
-				}
+				);
 			}
 
+			const indexingHint = buildIndexingHint(email);
 			return {
 				archivedEmailId: archivedEmail.id,
+				...(indexingHint ? { indexingHint } : {}),
 			};
 		} catch (error) {
 			logger.error({
@@ -751,5 +781,169 @@ export class IngestionService {
 				)
 			);
 		}
+	}
+
+	public static async getDiagnostics(sourceId: string): Promise<IngestionDiagnostics> {
+		const source = await this.findById(sourceId);
+		const groupIds = await this.findGroupSourceIds(sourceId);
+		const sourceFilter =
+			groupIds.length === 1
+				? eq(archivedEmails.ingestionSourceId, groupIds[0])
+				: inArray(archivedEmails.ingestionSourceId, groupIds);
+
+		const [[archivedRow], [indexedRow]] = await Promise.all([
+			db.select({ value: count() }).from(archivedEmails).where(sourceFilter),
+			db
+				.select({ value: count() })
+				.from(archivedEmails)
+				.where(and(sourceFilter, eq(archivedEmails.isIndexed, true))),
+		]);
+
+		const archivedEmailCount = Number(archivedRow?.value ?? 0);
+		const indexedEmailCount = Number(indexedRow?.value ?? 0);
+		const pendingIndexCount = Math.max(0, archivedEmailCount - indexedEmailCount);
+
+		const session = await SyncSessionService.findLatestBySourceId(sourceId);
+		const sessionInProgress =
+			session !== null &&
+			session.completedMailboxes + session.failedMailboxes < session.totalMailboxes;
+
+		const activeSyncSession =
+			session && sessionInProgress
+				? {
+						id: session.id,
+						isInitialImport: session.isInitialImport,
+						totalMailboxes: session.totalMailboxes,
+						completedMailboxes: session.completedMailboxes,
+						failedMailboxes: session.failedMailboxes,
+						errorMessages: session.errorMessages,
+						lastActivityAt: session.lastActivityAt.toISOString(),
+					}
+				: null;
+
+		const jobTypes = ['active', 'waiting', 'failed'] as const;
+		const [ingestionJobs, indexingJobs] = await Promise.all([
+			ingestionQueue.getJobs([...jobTypes], 0, 200, true),
+			indexingQueue.getJobs([...jobTypes], 0, 200, true),
+		]);
+
+		const matchesSource = (job: { data?: { ingestionSourceId?: string } }) =>
+			job.data?.ingestionSourceId === sourceId;
+
+		const ingestionForSource = ingestionJobs.filter(matchesSource);
+		const indexingForSource = indexingJobs.filter(matchesSource);
+
+		const failedJobs = (
+			await Promise.all(
+				[...ingestionForSource, ...indexingForSource].map(async (job) => ({
+					job,
+					state: await job.getState(),
+				}))
+			)
+		).filter(({ state }) => state === 'failed');
+
+		const recentFailures = (
+			await Promise.all(
+				failedJobs.slice(0, 10).map(async ({ job }) => ({
+					queue: ingestionForSource.includes(job)
+						? ('ingestion' as const)
+						: ('indexing' as const),
+					id: String(job.id),
+					name: job.name,
+					state: 'failed',
+					failedReason: job.failedReason,
+					stacktrace: job.stacktrace,
+					timestamp: job.timestamp,
+				}))
+			)
+		).sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
+
+		let ingestionActiveCount = 0;
+		let ingestionWaitingCount = 0;
+		let indexingActiveCount = 0;
+		let indexingWaitingCount = 0;
+		for (const job of ingestionForSource) {
+			const state = await job.getState();
+			if (state === 'active') ingestionActiveCount++;
+			if (state === 'waiting' || state === 'delayed') ingestionWaitingCount++;
+		}
+		for (const job of indexingForSource) {
+			const state = await job.getState();
+			if (state === 'active') indexingActiveCount++;
+			if (state === 'waiting' || state === 'delayed') indexingWaitingCount++;
+		}
+
+		let phase: IngestionDiagnostics['progress']['phase'] = 'idle';
+		let label = 'Idle';
+		let isIndeterminate = false;
+		let mailboxPercent: number | null = null;
+		let indexingPercent =
+			archivedEmailCount > 0
+				? Math.round((indexedEmailCount / archivedEmailCount) * 100)
+				: null;
+
+		if (source.status === 'error') {
+			phase = 'error';
+			label = source.lastSyncStatusMessage || 'Error';
+		} else if (
+			source.status === 'importing' ||
+			source.status === 'syncing' ||
+			activeSyncSession ||
+			ingestionActiveCount > 0
+		) {
+			phase = 'importing';
+			if (activeSyncSession && activeSyncSession.totalMailboxes > 0) {
+				const processed =
+					activeSyncSession.completedMailboxes + activeSyncSession.failedMailboxes;
+				mailboxPercent = Math.round(
+					(processed / activeSyncSession.totalMailboxes) * 100
+				);
+				if (processed === 0 && archivedEmailCount > 0) {
+					isIndeterminate = true;
+					label = `Importing… ${archivedEmailCount.toLocaleString()} emails archived`;
+				} else {
+					label = `Importing mailboxes ${processed}/${activeSyncSession.totalMailboxes}`;
+				}
+			} else if (archivedEmailCount > 0) {
+				isIndeterminate = true;
+				label = `Importing… ${archivedEmailCount.toLocaleString()} emails archived`;
+			} else {
+				isIndeterminate = true;
+				label = 'Import in progress…';
+			}
+		} else if (pendingIndexCount > 0 || indexingActiveCount > 0 || indexingWaitingCount > 0) {
+			phase = 'indexing';
+			label = `Indexing ${indexedEmailCount.toLocaleString()} / ${archivedEmailCount.toLocaleString()} emails`;
+		} else if (archivedEmailCount > 0) {
+			phase = 'complete';
+			label = `${archivedEmailCount.toLocaleString()} emails archived`;
+		}
+
+		return {
+			sourceId,
+			status: source.status,
+			provider: source.provider,
+			lastSyncStatusMessage: source.lastSyncStatusMessage,
+			lastSyncStartedAt: source.lastSyncStartedAt?.toISOString() ?? null,
+			lastSyncFinishedAt: source.lastSyncFinishedAt?.toISOString() ?? null,
+			archivedEmailCount,
+			indexedEmailCount,
+			pendingIndexCount,
+			activeSyncSession,
+			queue: {
+				ingestionActive: ingestionActiveCount,
+				ingestionWaiting: ingestionWaitingCount,
+				indexingActive: indexingActiveCount,
+				indexingWaiting: indexingWaitingCount,
+				recentFailures,
+			},
+			progress: {
+				phase,
+				mailboxPercent,
+				indexingPercent,
+				label,
+				isIndeterminate,
+			},
+		};
 	}
 }

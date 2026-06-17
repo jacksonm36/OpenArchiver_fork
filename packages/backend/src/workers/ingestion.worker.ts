@@ -1,5 +1,6 @@
 import { Worker } from 'bullmq';
 import { connection } from '../config/redis';
+import { config } from '../config';
 import initialImportProcessor from '../jobs/processors/initial-import.processor';
 import continuousSyncProcessor from '../jobs/processors/continuous-sync.processor';
 import scheduleContinuousSyncProcessor from '../jobs/processors/schedule-continuous-sync.processor';
@@ -26,10 +27,7 @@ const processor = async (job: any) => {
 
 const worker = new Worker('ingestion', processor, {
 	connection,
-	// Configurable via INGESTION_WORKER_CONCURRENCY env var. Tune based on available RAM.
-	concurrency: process.env.INGESTION_WORKER_CONCURRENCY
-		? parseInt(process.env.INGESTION_WORKER_CONCURRENCY, 10)
-		: 5,
+	concurrency: config.resources.ingestionWorkerConcurrency,
 	removeOnComplete: {
 		count: 100, // keep last 100 jobs
 	},
@@ -38,7 +36,13 @@ const worker = new Worker('ingestion', processor, {
 	},
 });
 
-logger.info('Ingestion worker started');
+logger.info(
+	{
+		resourceProfile: config.resources.profile,
+		concurrency: config.resources.ingestionWorkerConcurrency,
+	},
+	'Ingestion worker started'
+);
 
 process.on('SIGINT', () => worker.close());
 process.on('SIGTERM', () => worker.close());

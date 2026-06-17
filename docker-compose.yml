@@ -48,15 +48,21 @@ services:
         environment:
             MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-aSampleMasterKey}
             MEILI_SCHEDULE_SNAPSHOT: ${MEILI_SCHEDULE_SNAPSHOT:-86400}
+            # Limit indexing RAM on small hosts (override in docker-compose.low-resource.yml)
+            MEILI_MAX_INDEXING_MEMORY: ${MEILI_MAX_INDEXING_MEMORY:-512MiB}
+            MEILI_MAX_INDEXING_THREADS: ${MEILI_MAX_INDEXING_THREADS:-2}
         volumes:
             - meilidata:/meili_data
         networks:
             - open-archiver-net
 
+    # Optional OCR service. Start with: docker compose --profile ocr up -d
     tika:
+        profiles:
+            - ocr
         image: apache/tika:3.2.2.0-full
         container_name: tika
-        restart: always
+        restart: unless-stopped
         networks:
             - open-archiver-net
 
