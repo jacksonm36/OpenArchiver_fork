@@ -5,6 +5,7 @@ import busboy from 'busboy';
 import { config } from '../../config/index';
 import { logger } from '../../config/logger';
 import i18next from 'i18next';
+import { sanitizeUploadFilename } from '../../helpers/sanitizeUploadFilename';
 
 export const uploadFile = async (req: Request, res: Response) => {
 	const storage = new StorageService();
@@ -39,7 +40,7 @@ export const uploadFile = async (req: Request, res: Response) => {
 	}
 
 	bb.on('file', (fieldname, file, info) => {
-		originalFilename = info.filename;
+		originalFilename = sanitizeUploadFilename(info.filename);
 		const uuid = randomUUID();
 		filePath = `${config.storage.openArchiverFolderName}/tmp/${uuid}-${originalFilename}`;
 

@@ -1,0 +1,16 @@
+# Overlay for migrating from upstream logiclabshq/open-archiver to this fork.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.fork.yml build
+#   docker compose -f docker-compose.yml -f docker-compose.fork.yml up -d
+services:
+    open-archiver:
+        image: open-archiver-fork:local
+        build:
+            context: .
+            dockerfile: apps/open-archiver/Dockerfile
+        environment:
+            - RESOURCE_PROFILE=${RESOURCE_PROFILE:-auto}
+            - NODE_MAX_OLD_SPACE_MB=${NODE_MAX_OLD_SPACE_MB:-}
+            - OA_DATA=${OA_DATA:-${STORAGE_LOCAL_ROOT_PATH:-/var/data/open-archiver}}
+            - IMPORT_ALLOWED_PATHS=${IMPORT_ALLOWED_PATHS:-}
+            - BODY_SIZE_LIMIT=${BODY_SIZE_LIMIT:-Infinity}

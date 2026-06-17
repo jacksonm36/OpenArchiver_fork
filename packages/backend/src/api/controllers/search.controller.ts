@@ -3,10 +3,45 @@ import { SearchService } from '../../services/SearchService';
 import type { MatchingStrategy, SearchFieldScope, SearchFilters } from '@open-archiver/types';
 import { hasStructuralFilters } from '../../helpers/searchFilterBuilder';
 
+const VALID_SCOPES = new Set<SearchFieldScope>([
+	'from',
+	'to',
+	'cc',
+	'bcc',
+	'subject',
+	'body',
+	'attachments',
+]);
+
+const VALID_MATCHING_STRATEGIES = new Set<MatchingStrategy>(['last', 'all', 'frequency']);
+
+function parsePositiveInt(value: unknown, fallback: number, max: number): number {
+	if (typeof value !== 'string') {
+		return fallback;
+	}
+
+	const parsed = Number.parseInt(value, 10);
+	if (!Number.isFinite(parsed) || parsed < 1) {
+		return fallback;
+	}
+
+	return Math.min(parsed, max);
+}
+
 function parseSearchFilters(query: Request['query']): SearchFilters {
 	const filters: SearchFilters = {};
 
-	const stringFields = ['from', 'to', 'cc', 'bcc', 'subject', 'body', 'dateFrom', 'dateTo', 'ingestionSourceId'] as const;
+	const stringFields = [
+		'from',
+		'to',
+		'cc',
+		'bcc',
+		'subject',
+		'body',
+		'dateFrom',
+		'dateTo',
+		'ingestionSourceId',
+	] as const;
 	for (const field of stringFields) {
 		const value = query[field];
 		if (typeof value === 'string' && value.trim()) {
@@ -18,7 +53,8 @@ function parseSearchFilters(query: Request['query']): SearchFilters {
 		filters.tags = query.tags
 			.split(',')
 			.map((tag) => tag.trim())
-			.filter(Boolean);
+			.filter(Boolean)
+			.slice(0, 50);
 	}
 
 	if (query.hasAttachments === 'true') {
@@ -26,10 +62,15 @@ function parseSearchFilters(query: Request['query']): SearchFilters {
 	}
 
 	if (typeof query.scopes === 'string' && query.scopes.trim()) {
-		filters.scopes = query.scopes
+		const scopes = query.scopes
 			.split(',')
 			.map((scope) => scope.trim())
-			.filter(Boolean) as SearchFieldScope[];
+			.filter((scope): scope is SearchFieldScope =>
+				VALID_SCOPES.has(scope as SearchFieldScope)
+			);
+		if (scopes.length > 0) {
+			filters.scopes = scopes;
+		}
 	}
 
 	return filters;
@@ -73,13 +114,19 @@ export class SearchController {
 				return;
 			}
 
+			const parsedStrategy =
+				typeof matchingStrategy === 'string' &&
+				VALID_MATCHING_STRATEGIES.has(matchingStrategy as MatchingStrategy)
+					? (matchingStrategy as MatchingStrategy)
+					: 'last';
+
 			const results = await this.searchService.searchEmails(
 				{
 					query,
 					filters: Object.keys(filters).length > 0 ? filters : undefined,
-					page: page ? parseInt(page as string) : 1,
-					limit: limit ? parseInt(limit as string) : 10,
-					matchingStrategy: (matchingStrategy as MatchingStrategy) || 'last',
+					page: parsePositiveInt(page, 1, 10_000),
+					limit: parsePositiveInt(limit, 10, 100),
+					matchingStrategy: parsedStrategy,
 				},
 				userId,
 				req.ip || 'unknown'

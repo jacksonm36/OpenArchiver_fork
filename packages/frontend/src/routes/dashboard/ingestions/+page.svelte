@@ -13,7 +13,7 @@
 	import { api } from '$lib/api.client';
 	import type { SafeIngestionSource, CreateIngestionSourceDto, IngestionDiagnostics } from '@open-archiver/types';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
-	import { onDestroy } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { t } from '$lib/translations';
 
 	let { data }: { data: PageData } = $props();
@@ -34,6 +34,8 @@
 	let diagnosticsSource = $state<SafeIngestionSource | null>(null);
 	let isDiagnosticsOpen = $state(false);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
+	let isPageVisible = $state(true);
+	const POLL_INTERVAL_MS = 8000;
 
 	const activeSourceIds = $derived(
 		ingestionSources
@@ -69,20 +71,47 @@
 		}
 	}
 
-	$effect(() => {
-		if (activeSourceIds.length > 0) {
-			if (!pollTimer) {
-				refreshSourcesAndDiagnostics();
-				pollTimer = setInterval(refreshSourcesAndDiagnostics, 4000);
-			}
-		} else if (pollTimer) {
+	function stopPolling() {
+		if (pollTimer) {
 			clearInterval(pollTimer);
 			pollTimer = null;
 		}
+	}
+
+	function startPolling() {
+		if (pollTimer || activeSourceIds.length === 0 || !isPageVisible) {
+			return;
+		}
+		refreshSourcesAndDiagnostics();
+		pollTimer = setInterval(refreshSourcesAndDiagnostics, POLL_INTERVAL_MS);
+	}
+
+	$effect(() => {
+		if (activeSourceIds.length > 0 && isPageVisible) {
+			startPolling();
+		} else {
+			stopPolling();
+		}
+	});
+
+	onMount(() => {
+		const handleVisibilityChange = () => {
+			isPageVisible = document.visibilityState === 'visible';
+			if (isPageVisible) {
+				startPolling();
+			} else {
+				stopPolling();
+			}
+		};
+
+		document.addEventListener('visibilitychange', handleVisibilityChange);
+		return () => {
+			document.removeEventListener('visibilitychange', handleVisibilityChange);
+		};
 	});
 
 	onDestroy(() => {
-		if (pollTimer) clearInterval(pollTimer);
+		stopPolling();
 	});
 
 	const openDiagnostics = (source: SafeIngestionSource) => {

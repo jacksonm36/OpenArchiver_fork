@@ -69,7 +69,11 @@ export class IngestionController {
 	public findById = async (req: Request, res: Response): Promise<Response> => {
 		try {
 			const { id } = req.params;
-			const source = await IngestionService.findById(id);
+			const userId = req.user?.sub;
+			if (!userId) {
+				return res.status(401).json({ message: req.t('errors.unauthorized') });
+			}
+			const source = await IngestionService.findByIdForUser(id, userId);
 			const safeSource = this.toSafeIngestionSource(source);
 			return res.status(200).json(safeSource);
 		} catch (error) {
@@ -205,7 +209,11 @@ export class IngestionController {
 	public getDiagnostics = async (req: Request, res: Response): Promise<Response> => {
 		try {
 			const { id } = req.params;
-			const diagnostics = await IngestionService.getDiagnostics(id);
+			const userId = req.user?.sub;
+			if (!userId) {
+				return res.status(401).json({ message: req.t('errors.unauthorized') });
+			}
+			const diagnostics = await IngestionService.getDiagnostics(id, userId);
 			return res.status(200).json(diagnostics);
 		} catch (error) {
 			logger.error({ err: error }, `Get diagnostics for ${req.params.id} error`);

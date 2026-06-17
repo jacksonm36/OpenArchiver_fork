@@ -69,6 +69,8 @@ The installer auto-detects RAM and applies the `low` profile:
 
 See [low-resource deployment guide](../../docs/user-guides/low-resource-deployment.md).
 
+See [migration guide](../../scripts/migrate/README.md) for upgrading from upstream OpenArchiver.
+
 ### Syncing to install-scripts repo
 
 Copy this file to [jacksonm36/install-scripts](https://github.com/jacksonm36/install-scripts):

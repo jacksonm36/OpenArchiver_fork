@@ -3,6 +3,7 @@ import { join } from 'path';
 import { createWriteStream, promises as fs } from 'fs';
 import { PSTFile } from 'pst-extractor';
 import type { StorageService } from '../../StorageService';
+import { assertAllowedLocalImportPath, assertAllowedUploadedFilePath } from '../../../helpers/localImportPath';
 
 export interface PstSession {
 	pstFile: PSTFile;
@@ -23,8 +24,9 @@ export async function openPstFile(options: OpenPstFileOptions): Promise<PstSessi
 	const { localFilePath, uploadedFilePath, storage } = options;
 
 	if (localFilePath) {
-		await fs.access(localFilePath);
-		const pstFile = new PSTFile(localFilePath);
+		const safePath = await assertAllowedLocalImportPath(localFilePath);
+		await fs.access(safePath);
+		const pstFile = new PSTFile(safePath);
 		return {
 			pstFile,
 			cleanup: async () => {
@@ -37,6 +39,7 @@ export async function openPstFile(options: OpenPstFileOptions): Promise<PstSessi
 		throw new Error('PST file path not provided.');
 	}
 
+	assertAllowedUploadedFilePath(uploadedFilePath);
 	const tempDir = await fs.mkdtemp(join(tmpdir(), 'oa-pst-'));
 	const tempFilePath = join(tempDir, 'archive.pst');
 	const fileStream = await storage.getStream(uploadedFilePath);

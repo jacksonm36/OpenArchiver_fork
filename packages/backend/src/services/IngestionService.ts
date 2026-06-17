@@ -34,6 +34,7 @@ import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { mapWithConcurrency } from '../helpers/parallel';
 import { SyncSessionService } from './SyncSessionService';
+import { validateFileImportCredentials } from '../helpers/localImportPath';
 
 function buildIndexingHint(email: EmailObject): IndexingHint | undefined {
 	const body = email.body || email.html || '';
@@ -84,6 +85,7 @@ export class IngestionService {
 		actorIp: string
 	): Promise<IngestionSource> {
 		const { providerConfig, mergedIntoId, ...rest } = dto;
+		await validateFileImportCredentials(rest.provider, providerConfig);
 		const encryptedCredentials = CryptoService.encryptObject(providerConfig);
 
 		// Resolve merge target: if mergedIntoId points to a child, follow to the root.
@@ -174,6 +176,24 @@ export class IngestionService {
 		return decryptedSource;
 	}
 
+	public static async findByIdForUser(id: string, userId: string): Promise<IngestionSource> {
+		const { drizzleFilter } = await FilterBuilder.create(userId, 'ingestion', 'read');
+		const whereClause = drizzleFilter
+			? and(eq(ingestionSources.id, id), drizzleFilter)
+			: eq(ingestionSources.id, id);
+
+		const [source] = await db.select().from(ingestionSources).where(whereClause);
+		if (!source) {
+			throw new Error('Ingestion source not found');
+		}
+
+		const decryptedSource = this.decryptSource(source);
+		if (!decryptedSource) {
+			throw new Error('Failed to decrypt ingestion source credentials.');
+		}
+		return decryptedSource;
+	}
+
 	public static async update(
 		id: string,
 		dto: UpdateIngestionSourceDto,
@@ -187,6 +207,10 @@ export class IngestionService {
 		const originalSource = await this.findById(id);
 
 		if (providerConfig) {
+			await validateFileImportCredentials(
+				rest.provider ?? originalSource.provider,
+				providerConfig
+			);
 			// Encrypt the new credentials before updating
 			valuesToUpdate.credentials = CryptoService.encryptObject(providerConfig);
 		}
@@ -783,8 +807,11 @@ export class IngestionService {
 		}
 	}
 
-	public static async getDiagnostics(sourceId: string): Promise<IngestionDiagnostics> {
-		const source = await this.findById(sourceId);
+	public static async getDiagnostics(
+		sourceId: string,
+		userId: string
+	): Promise<IngestionDiagnostics> {
+		const source = await this.findByIdForUser(sourceId, userId);
 		const groupIds = await this.findGroupSourceIds(sourceId);
 		const sourceFilter =
 			groupIds.length === 1
@@ -822,9 +849,10 @@ export class IngestionService {
 				: null;
 
 		const jobTypes = ['active', 'waiting', 'failed'] as const;
+		const diagnosticsJobScanLimit = 20;
 		const [ingestionJobs, indexingJobs] = await Promise.all([
-			ingestionQueue.getJobs([...jobTypes], 0, 200, true),
-			indexingQueue.getJobs([...jobTypes], 0, 200, true),
+			ingestionQueue.getJobs([...jobTypes], 0, diagnosticsJobScanLimit, true),
+			indexingQueue.getJobs([...jobTypes], 0, diagnosticsJobScanLimit, true),
 		]);
 
 		const matchesSource = (job: { data?: { ingestionSourceId?: string } }) =>

@@ -42,6 +42,7 @@ COPY --from=build /app/packages/backend/src/database/migrations ./packages/backe
 COPY --from=build /app/packages/frontend/build ./packages/frontend/build
 COPY --from=build /app/packages/types/dist ./packages/types/dist
 COPY --from=build /app/apps/open-archiver/dist ./apps/open-archiver/dist
+COPY --from=build /app/scripts/migrate/reindex-all-emails.mjs ./scripts/migrate/reindex-all-emails.mjs
 
 # Copy the entrypoint script and make it executable
 COPY docker/docker-entrypoint.sh /usr/local/bin/
