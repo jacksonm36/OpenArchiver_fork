@@ -1,4 +1,5 @@
 import type { RequestEvent } from '@sveltejs/kit';
+import { AUTH_COOKIE_NAME } from '$lib/server/session';
 
 const BASE_URL = '/api/v1'; // Using a relative URL for proxying
 
