@@ -44,6 +44,7 @@ COPY --from=build /app/packages/types/dist ./packages/types/dist
 COPY --from=build /app/apps/open-archiver/dist ./apps/open-archiver/dist
 COPY --from=build /app/scripts/migrate/reindex-all-emails.mjs ./scripts/migrate/reindex-all-emails.mjs
 COPY --from=build /app/scripts/detect-resources.mjs ./scripts/detect-resources.mjs
+COPY --from=build /app/scripts/run-node-with-heap.mjs ./scripts/run-node-with-heap.mjs
 COPY --from=build /app/scripts/lib ./scripts/lib
 
 # Copy the entrypoint script and make it executable (strip CRLF for Windows checkouts)
