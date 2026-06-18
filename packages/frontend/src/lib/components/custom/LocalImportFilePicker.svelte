@@ -114,7 +114,7 @@
 				</p>
 			{:else}
 				<ul class="divide-y">
-					{#each listing.entries as entry}
+					{#each listing.entries as entry (entry.path)}
 						<li>
 							{#if entry.isDirectory}
 								<button

@@ -21,6 +21,31 @@
 	import tippy from 'tippy.js';
 	import 'tippy.js/dist/tippy.css';
 	import { t } from '$lib/translations';
+	import type { IngestionProvider } from '@open-archiver/types';
+
+	function createProviderConfig(provider: IngestionProvider): Record<string, unknown> {
+		switch (provider) {
+			case 'google_workspace':
+				return { type: provider, serviceAccountKeyJson: '', impersonatedAdminEmail: '' };
+			case 'microsoft_365':
+				return { type: provider, clientId: '', clientSecret: '', tenantId: '' };
+			case 'pst_import':
+			case 'eml_import':
+			case 'mbox_import':
+				return { type: provider, localFilePath: '' };
+			default:
+				return {
+					type: 'generic_imap',
+					host: '',
+					port: 993,
+					username: '',
+					password: '',
+					secure: true,
+					allowInsecureCert: false,
+				};
+		}
+	}
+
 	let {
 		source = null,
 		existingSources = [],
@@ -32,7 +57,7 @@
 		onSubmit: (data: CreateIngestionSourceDto) => Promise<void>;
 	} = $props();
 
-	const providerOptions = [
+	const providerOptions = $derived([
 		{
 			value: 'generic_imap',
 			label: $t('app.components.ingestion_source_form.provider_generic_imap'),
@@ -57,25 +82,29 @@
 			value: 'mbox_import',
 			label: $t('app.components.ingestion_source_form.provider_mbox_import'),
 		},
-	];
+	] as const);
 
 	/** Only show root sources (not children) in the merge dropdown */
 	const mergeableRootSources = $derived(existingSources.filter((s) => !s.mergedIntoId));
 
+	const initialProvider = (source?.provider ?? 'generic_imap') as IngestionProvider;
+
 	let formData: CreateIngestionSourceDto = $state({
 		name: source?.name ?? '',
-		provider: source?.provider ?? 'generic_imap',
-		providerConfig: {
-			type: source?.provider ?? 'generic_imap',
-			secure: true,
-			allowInsecureCert: false,
-		},
-		preserveOriginalFile: source?.preserveOriginalFile ?? false,
-		streamAttachmentsOnImport: source?.streamAttachmentsOnImport ?? true,
+		provider: initialProvider,
+		providerConfig: createProviderConfig(initialProvider),
+		preserveOriginalFile: Boolean(source?.preserveOriginalFile ?? false),
+		streamAttachmentsOnImport: Boolean(source?.streamAttachmentsOnImport ?? true),
 	});
 
+	let activeProvider = $state(initialProvider);
+
 	$effect(() => {
-		formData.providerConfig.type = formData.provider;
+		const provider = formData.provider as IngestionProvider;
+		if (provider !== activeProvider) {
+			activeProvider = provider;
+			formData.providerConfig = createProviderConfig(provider);
+		}
 	});
 
 	const triggerContent = $derived(
@@ -635,7 +664,10 @@
 						</div>
 						<Switch
 							id="streamAttachmentsOnImport"
-							bind:checked={formData.streamAttachmentsOnImport}
+							checked={formData.streamAttachmentsOnImport === true}
+							onCheckedChange={(checked) => {
+								formData.streamAttachmentsOnImport = checked;
+							}}
 						/>
 					</div>
 				{/if}
@@ -697,7 +729,10 @@
 							<div class="col-span-3">
 								<Select.Root
 									name="mergedIntoId"
-									bind:value={formData.mergedIntoId}
+									value={formData.mergedIntoId ?? ''}
+									onValueChange={(value) => {
+										formData.mergedIntoId = value || undefined;
+									}}
 									type="single"
 								>
 									<Select.Trigger class="w-full">
