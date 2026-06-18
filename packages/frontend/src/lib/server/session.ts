@@ -11,11 +11,15 @@ export type SessionUser = {
 };
 
 export function setAuthCookie(cookies: Cookies, accessToken: string): void {
+	const appUrl = process.env.APP_URL ?? '';
+	const secure =
+		process.env.NODE_ENV === 'production' || appUrl.startsWith('https://');
+
 	cookies.set(AUTH_COOKIE_NAME, accessToken, {
 		path: '/',
 		httpOnly: true,
 		sameSite: 'strict',
-		secure: process.env.NODE_ENV === 'production',
+		secure,
 		maxAge: AUTH_MAX_AGE_SECONDS,
 	});
 }

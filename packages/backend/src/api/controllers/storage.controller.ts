@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { StorageService } from '../../services/StorageService';
 import * as path from 'path';
 import { storage as storageConfig } from '../../config/storage';
+import { assertAllowedStorageObjectPath } from '../../helpers/localImportPath';
 
 export class StorageController {
 	constructor(private storageService: StorageService) {}
@@ -14,13 +15,11 @@ export class StorageController {
 			return;
 		}
 
-		// Normalize the path to prevent directory traversal
-		const normalizedPath = path
-			.normalize(unsafePath)
-			.replace(/^(\.\.(\/|\\|$))+/, '')
-			.replace(/\\/g, '/');
-
-		if (normalizedPath.includes('\0') || path.isAbsolute(normalizedPath)) {
+		let safePath: string;
+		try {
+			assertAllowedStorageObjectPath(unsafePath);
+			safePath = path.posix.normalize(unsafePath.replace(/\\/g, '/'));
+		} catch {
 			res.status(400).send(req.t('storage.invalidFilePath'));
 			return;
 		}
@@ -29,7 +28,7 @@ export class StorageController {
 		const basePath = path.resolve(
 			storageConfig.type === 'local' ? storageConfig.rootPath : '/'
 		);
-		const resolvedPath = path.resolve(basePath, normalizedPath);
+		const resolvedPath = path.resolve(basePath, safePath.split('/').join(path.sep));
 		const relativePath = path.relative(basePath, resolvedPath);
 
 		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
@@ -37,17 +36,17 @@ export class StorageController {
 			return;
 		}
 
-		const safePath = relativePath.split(path.sep).join('/');
+		const storageKey = relativePath.split(path.sep).join('/');
 
 		try {
-			const fileExists = await this.storageService.exists(safePath);
+			const fileExists = await this.storageService.exists(storageKey);
 			if (!fileExists) {
 				res.status(404).send(req.t('storage.fileNotFound'));
 				return;
 			}
 
-			const fileStream = await this.storageService.get(safePath);
-			const fileName = path.basename(safePath);
+			const fileStream = await this.storageService.get(storageKey);
+			const fileName = path.basename(storageKey);
 			const asciiName = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
 			res.setHeader(
 				'Content-Disposition',

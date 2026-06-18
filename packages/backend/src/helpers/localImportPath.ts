@@ -107,15 +107,26 @@ export async function assertAllowedLocalImportPath(filePath: string): Promise<st
  * Ensures an uploaded file path points only to the temporary upload area in storage.
  */
 export function assertAllowedUploadedFilePath(uploadedFilePath: string): void {
-	const normalized = path.posix.normalize(uploadedFilePath.replace(/\\/g, '/'));
-	const prefix = `${storage.openArchiverFolderName}/tmp/`;
+	assertAllowedStorageObjectPath(uploadedFilePath, `${storage.openArchiverFolderName}/tmp/`);
+}
+
+/**
+ * Ensures a storage object path stays under the Open Archiver data prefix.
+ */
+export function assertAllowedStorageObjectPath(
+	objectPath: string,
+	requiredPrefix?: string
+): void {
+	const normalized = path.posix.normalize(objectPath.replace(/\\/g, '/'));
+	const prefix =
+		requiredPrefix ?? `${storage.openArchiverFolderName}/`;
 
 	if (
 		!normalized.startsWith(prefix) ||
 		normalized.includes('..') ||
 		normalized.includes('\0')
 	) {
-		throw new Error('Invalid uploaded file path');
+		throw new Error('Invalid storage path');
 	}
 }
 

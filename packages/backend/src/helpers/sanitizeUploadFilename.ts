@@ -1,7 +1,7 @@
 /**
  * Strips directory components and dangerous characters from an uploaded filename.
  */
-export function sanitizeUploadFilename(filename: string): string {
+export function sanitizeUploadFilename(filename: string, maxLength = 200): string {
 	const base =
 		filename
 			.replace(/\\/g, '/')
@@ -9,7 +9,8 @@ export function sanitizeUploadFilename(filename: string): string {
 			.pop()
 			?.replace(/\0/g, '')
 			.replace(/\.\./g, '')
-			.trim() ?? '';
+			.trim()
+			.slice(0, maxLength) ?? '';
 
 	if (!base || base === '.' || base === '..') {
 		return 'upload.bin';

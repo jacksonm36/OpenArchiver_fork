@@ -5,13 +5,31 @@ import { AUTH_COOKIE_NAME } from '$lib/server/session';
 
 const BACKEND_URL = `http://localhost:${env.PORT_BACKEND || 4000}`;
 
+const STRIPPED_REQUEST_HEADERS = new Set([
+	'connection',
+	'cookie',
+	'host',
+	'keep-alive',
+	'proxy-connection',
+	'te',
+	'trailer',
+	'transfer-encoding',
+	'upgrade',
+]);
+
 const handleRequest: RequestHandler = async ({ request, params, fetch, cookies }) => {
 	const url = new URL(request.url);
 	const slug = params.slug || '';
 	const targetUrl = `${BACKEND_URL}/${slug}${url.search}`;
 
 	try {
-		const headers = new Headers(request.headers);
+		const headers = new Headers();
+		for (const [key, value] of request.headers.entries()) {
+			if (!STRIPPED_REQUEST_HEADERS.has(key.toLowerCase())) {
+				headers.set(key, value);
+			}
+		}
+
 		const sessionToken = cookies.get(AUTH_COOKIE_NAME);
 		if (sessionToken && !headers.has('authorization')) {
 			headers.set('Authorization', `Bearer ${sessionToken}`);
