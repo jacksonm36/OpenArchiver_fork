@@ -28,7 +28,7 @@ export class MicrosoftConnector implements IEmailConnector {
 
 	constructor(credentials: Microsoft365Credentials, options?: ConnectorOptions) {
 		this.credentials = credentials;
-		this.options = options ?? { preserveOriginalFile: false };
+		this.options = options ?? { preserveOriginalFile: false, streamAttachmentsOnImport: true };
 		this.newDeltaTokens = {}; // Initialize as an empty object
 
 		const msalConfig: Configuration = {

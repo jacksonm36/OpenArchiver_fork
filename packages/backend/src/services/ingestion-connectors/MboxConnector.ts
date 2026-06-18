@@ -14,6 +14,9 @@ import { StorageService } from '../StorageService';
 import { Readable, Transform } from 'stream';
 import { createHash } from 'crypto';
 import { promises as fs, createReadStream } from 'fs';
+import type { FileImportProgressContext } from '../../helpers/fileImportProgress';
+import { FileImportIndexTracker } from '../../helpers/fileImportProgress';
+import { extractMessageIdFromEmlBytes } from '../../helpers/emlHeaderScan';
 
 class MboxSplitter extends Transform {
 	private buffer: Buffer = Buffer.alloc(0);
@@ -22,22 +25,21 @@ class MboxSplitter extends Transform {
 
 	_transform(chunk: Buffer, encoding: string, callback: Function) {
 		if (this.firstChunk) {
-			// Check if the file starts with "From ". If not, prepend it to the first email.
 			if (chunk.subarray(0, 5).toString() !== 'From ') {
 				this.push(Buffer.from('From '));
 			}
 			this.firstChunk = false;
 		}
 
-		let currentBuffer = Buffer.concat([this.buffer, chunk]);
+		let currentBuffer =
+			this.buffer.length > 0 ? Buffer.concat([this.buffer, chunk]) : chunk;
 		let position;
 
-		while ((position = currentBuffer.indexOf(this.delimiter)) > -1) {
+		while ((position = currentBuffer.indexOf(this.delimiter, 5)) > -1) {
 			const email = currentBuffer.subarray(0, position);
 			if (email.length > 0) {
 				this.push(email);
 			}
-			// The next email starts with "From ", which is what the parser expects.
 			currentBuffer = currentBuffer.subarray(position + 1);
 		}
 
@@ -56,12 +58,13 @@ class MboxSplitter extends Transform {
 export class MboxConnector implements IEmailConnector {
 	private storage: StorageService;
 	private options: ConnectorOptions;
+	private importCompleted = false;
 
 	constructor(
 		private credentials: MboxImportCredentials,
 		options?: ConnectorOptions
 	) {
-		this.options = options ?? { preserveOriginalFile: false };
+		this.options = options ?? { preserveOriginalFile: false, streamAttachmentsOnImport: true };
 		this.storage = new StorageService();
 	}
 
@@ -139,33 +142,86 @@ export class MboxConnector implements IEmailConnector {
 
 	public async *fetchEmails(
 		userEmail: string,
-		syncState?: SyncState | null
+		_syncState?: SyncState | null,
+		checkDuplicate?: (messageId: string) => Promise<boolean>,
+		fileImportProgress?: FileImportProgressContext
 	): AsyncGenerator<EmailObject | null> {
+		const indexTracker = new FileImportIndexTracker(
+			fileImportProgress?.resumeAfterIndex ?? -1
+		);
 		const filePath = this.getFilePath();
 		const fileStream = await this.getFileStream();
 		const mboxSplitter = new MboxSplitter();
 		const emailStream = fileStream.pipe(mboxSplitter);
 
-		for await (const emailBuffer of emailStream) {
-			try {
-				const emailObject = await this.parseMessage(emailBuffer as Buffer, '');
-				yield emailObject;
-			} catch (error) {
-				logger.error(
-					{ error, file: filePath },
-					'Failed to process a single message from mbox file. Skipping.'
-				);
-			}
-		}
+		try {
+			for await (const emailBuffer of emailStream) {
+				if (fileImportProgress?.stopSignal?.stopped) {
+					break;
+				}
+				if (indexTracker.shouldSkip()) {
+					continue;
+				}
 
-		if (this.credentials.uploadedFilePath && !this.credentials.localFilePath) {
-			try {
-				await this.storage.delete(filePath);
-			} catch (error) {
-				logger.error(
-					{ error, file: filePath },
-					'Failed to delete mbox file after processing.'
-				);
+				const globalIndex = indexTracker.currentIndex();
+
+				try {
+					const peekId = extractMessageIdFromEmlBytes(
+						(emailBuffer as Buffer).subarray(
+							0,
+							Math.min((emailBuffer as Buffer).length, 64 * 1024)
+						)
+					);
+
+					if (peekId && checkDuplicate && (await checkDuplicate(peekId))) {
+						await fileImportProgress?.onMessageHandled({
+							lastGlobalIndex: globalIndex,
+							lastMessageId: peekId,
+						});
+						continue;
+					}
+
+					const emailObject = await this.parseMessage(emailBuffer as Buffer, '');
+
+					if (checkDuplicate && (await checkDuplicate(emailObject.id))) {
+						await fileImportProgress?.onMessageHandled({
+							lastGlobalIndex: globalIndex,
+							lastMessageId: emailObject.id,
+						});
+						continue;
+					}
+
+					if (fileImportProgress?.dedupOnly) {
+						if (fileImportProgress.stopSignal) {
+							fileImportProgress.stopSignal.stopped = true;
+						}
+						break;
+					}
+
+					yield { ...emailObject, fileImportIndex: globalIndex };
+				} catch (error) {
+					logger.error(
+						{ error, file: filePath },
+						'Failed to process a single message from mbox file. Skipping.'
+					);
+				}
+			}
+
+			this.importCompleted = true;
+		} finally {
+			if (
+				this.importCompleted &&
+				this.credentials.uploadedFilePath &&
+				!this.credentials.localFilePath
+			) {
+				try {
+					await this.storage.delete(filePath);
+				} catch (error) {
+					logger.error(
+						{ error, file: filePath },
+						'Failed to delete mbox file after processing.'
+					);
+				}
 			}
 		}
 	}
@@ -265,7 +321,7 @@ export class MboxConnector implements IEmailConnector {
 		};
 	}
 
-	public getUpdatedSyncState(): SyncState {
+	public getUpdatedSyncState(_userEmail?: string): SyncState {
 		return {};
 	}
 }

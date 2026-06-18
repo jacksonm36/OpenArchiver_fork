@@ -7,6 +7,8 @@ import scheduleContinuousSyncProcessor from '../jobs/processors/schedule-continu
 import { processMailboxProcessor } from '../jobs/processors/process-mailbox.processor';
 import syncCycleFinishedProcessor from '../jobs/processors/sync-cycle-finished.processor';
 import { logger } from '../config/logger';
+import { attachWorkerLogging } from './attachWorkerLogging';
+import { activityLogService } from '../services/ActivityLogService';
 
 const processor = async (job: any) => {
 	switch (job.name) {
@@ -44,5 +46,25 @@ logger.info(
 	'Ingestion worker started'
 );
 
-process.on('SIGINT', () => worker.close());
-process.on('SIGTERM', () => worker.close());
+attachWorkerLogging(worker, 'ingestion');
+
+void activityLogService.push({
+	level: 'success',
+	source: 'worker',
+	message: `ingestion worker online (concurrency=${config.resources.ingestionWorkerConcurrency})`,
+});
+
+const shutdown = async (signal: string) => {
+	logger.info(`${signal} received, shutting down ingestion worker...`);
+	try {
+		await worker.close();
+		logger.info('Ingestion worker closed');
+		process.exit(0);
+	} catch (err) {
+		logger.error({ err }, 'Failed to close ingestion worker');
+		process.exit(1);
+	}
+};
+
+process.once('SIGINT', () => void shutdown('SIGINT'));
+process.once('SIGTERM', () => void shutdown('SIGTERM'));

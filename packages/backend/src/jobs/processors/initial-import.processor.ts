@@ -7,8 +7,8 @@ import { SyncSessionService } from '../../services/SyncSessionService';
 import { logger } from '../../config/logger';
 
 export default async (job: Job<IInitialImportJob>) => {
-	const { ingestionSourceId } = job.data;
-	logger.info({ ingestionSourceId }, 'Starting initial import master job');
+	const { ingestionSourceId, resumeMode } = job.data;
+	logger.info({ ingestionSourceId, resumeMode }, 'Starting initial import master job');
 
 	try {
 		const source = await IngestionService.findById(ingestionSourceId);
@@ -16,9 +16,15 @@ export default async (job: Job<IInitialImportJob>) => {
 			throw new Error(`Ingestion source with ID ${ingestionSourceId} not found`);
 		}
 
+		const statusMessage = resumeMode
+			? resumeMode === 'dedup'
+				? 'Resuming duplicate scan from last processed message…'
+				: 'Resuming import from last processed message…'
+			: 'Starting initial import...';
+
 		await IngestionService.update(ingestionSourceId, {
 			status: 'importing',
-			lastSyncStatusMessage: 'Starting initial import...',
+			lastSyncStatusMessage: statusMessage,
 		});
 
 		const connector = EmailProviderFactory.createConnector(source);
@@ -68,6 +74,8 @@ export default async (job: Job<IInitialImportJob>) => {
 				ingestionSourceId,
 				userEmail,
 				sessionId,
+				resumeMode,
+				isInitialImport: true,
 			});
 		}
 

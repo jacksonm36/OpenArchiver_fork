@@ -4,11 +4,10 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
-	import { api } from '$lib/api.client';
 	import { authStore } from '$lib/stores/auth.store';
-	import type { LoginResponse } from '@open-archiver/types';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
 	import { t } from '$lib/translations';
+	import type { User } from '@open-archiver/types';
 
 	let email = '';
 	let password = '';
@@ -17,8 +16,10 @@
 	async function handleSubmit() {
 		isLoading = true;
 		try {
-			const response = await api('/auth/login', {
+			const response = await fetch('/auth/login', {
 				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
 				body: JSON.stringify({ email, password }),
 			});
 			if (!response.ok) {
@@ -32,8 +33,8 @@
 				throw new Error(errorMessage);
 			}
 
-			const loginData: LoginResponse = await response.json();
-			authStore.login(loginData.accessToken, loginData.user);
+			const loginData: { user: Omit<User, 'passwordHash'> } = await response.json();
+			authStore.login(loginData.user);
 			// Redirect to a protected page after login
 			goto('/dashboard');
 		} catch (e: any) {

@@ -36,7 +36,12 @@ export default async (job: Job<ISyncCycleFinishedJob>) => {
 		const source = await IngestionService.findById(ingestionSourceId);
 
 		if (fileBasedIngestions.includes(source.provider)) {
-			status = 'imported';
+			const checkpoint = Object.values(source.syncState?.fileImport ?? {})[0];
+			if (checkpoint?.complete) {
+				status = 'imported';
+			} else if (session.failedMailboxes === 0) {
+				status = 'error';
+			}
 		}
 
 		if (session.failedMailboxes > 0) {
@@ -48,9 +53,17 @@ export default async (job: Job<ISyncCycleFinishedJob>) => {
 				'Sync cycle finished with errors.'
 			);
 		} else {
-			message = isInitialImport
-				? `Initial import finished for ${session.completedMailboxes} mailboxes.`
-				: 'Continuous sync cycle finished successfully.';
+			const fileCheckpoint = fileBasedIngestions.includes(source.provider)
+				? Object.values(source.syncState?.fileImport ?? {})[0]
+				: undefined;
+			if (fileCheckpoint && !fileCheckpoint.complete) {
+				message =
+					'Import incomplete. Resume duplicate scan or import to continue from the last processed message.';
+			} else {
+				message = isInitialImport
+					? `Initial import finished for ${session.completedMailboxes} mailboxes.`
+					: 'Continuous sync cycle finished successfully.';
+			}
 			logger.info({ ingestionSourceId, sessionId }, 'Sync cycle finished successfully.');
 		}
 

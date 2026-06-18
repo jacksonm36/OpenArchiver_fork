@@ -25,7 +25,7 @@ export class GoogleWorkspaceConnector implements IEmailConnector {
 
 	constructor(credentials: GoogleWorkspaceCredentials, options?: ConnectorOptions) {
 		this.credentials = credentials;
-		this.options = options ?? { preserveOriginalFile: false };
+		this.options = options ?? { preserveOriginalFile: false, streamAttachmentsOnImport: true };
 		try {
 			// Pre-parse the JSON key to catch errors early.
 			const parsedKey = JSON.parse(this.credentials.serviceAccountKeyJson);

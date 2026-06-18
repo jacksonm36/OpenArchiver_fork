@@ -89,11 +89,15 @@
 	$effect(() => {
 		async function parseEmlAttachments() {
 			const raw = email?.raw;
-			if (!raw) return;
+			if (!raw || email?.rawTooLarge) return;
 
 			try {
 				let buffer: Uint8Array;
-				if (raw && typeof raw === 'object' && 'type' in raw && raw.type === 'Buffer') {
+				if (typeof raw === 'string') {
+					const binary = atob(raw);
+					buffer = new Uint8Array(binary.length);
+					for (let i = 0; i < binary.length; i++) buffer[i] = binary.charCodeAt(i);
+				} else if (raw && typeof raw === 'object' && 'type' in raw && raw.type === 'Buffer') {
 					buffer = new Uint8Array(
 						(raw as unknown as { type: 'Buffer'; data: number[] }).data
 					);
@@ -179,10 +183,10 @@
 	});
 
 	async function download(path: string, filename: string) {
-		if (!browser) return;
+		if (!browser || !email) return;
 
 		try {
-			const response = await api(`/storage/download?path=${encodeURIComponent(path)}`);
+			const response = await api(`/archived-emails/${email.id}/export/eml`);
 
 			if (!response.ok) {
 				throw new Error(`HTTP error! status: ${response.status}`);
@@ -192,7 +196,7 @@
 			const url = window.URL.createObjectURL(blob);
 			const a = document.createElement('a');
 			a.href = url;
-			a.download = filename;
+			a.download = filename.endsWith('.eml') ? filename : `${filename}.eml`;
 			document.body.appendChild(a);
 			a.click();
 			window.URL.revokeObjectURL(url);
@@ -326,7 +330,7 @@
 						</div>
 						<div>
 							<h3 class="font-semibold">{$t('app.archive.email_preview')}</h3>
-							<EmailPreview raw={email.raw} />
+							<EmailPreview raw={email.raw} rawTooLarge={email.rawTooLarge} />
 						</div>
 						{#if email.attachments && email.attachments.length > 0}
 							<div>

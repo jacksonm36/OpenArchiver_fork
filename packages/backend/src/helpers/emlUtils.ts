@@ -216,3 +216,99 @@ export async function stripAttachmentsFromEml(emlBuffer: Buffer): Promise<Buffer
 		return emlBuffer;
 	}
 }
+
+export interface ExportAttachmentPart {
+	filename: string;
+	contentType: string;
+	content: Buffer;
+}
+
+/**
+ * Rebuilds a full RFC822 message by merging stored body-only .eml with archived attachments.
+ * Used for export (EML / Mbox / ZIP) so output matches standard mail tools.
+ */
+export async function rebuildEmlWithAttachments(
+	emlBuffer: Buffer,
+	attachments: ExportAttachmentPart[]
+): Promise<Buffer> {
+	if (attachments.length === 0) {
+		return emlBuffer;
+	}
+
+	try {
+		const parsed = await simpleParser(emlBuffer);
+		const htmlBody = parsed.html || '';
+		const referencedCids = extractCidReferences(htmlBody);
+
+		const inlineParts: Mail.Attachment[] = [];
+		const fileParts: Mail.Attachment[] = [];
+
+		for (const attachment of parsed.attachments ?? []) {
+			if (isInlineAttachment(attachment, referencedCids)) {
+				inlineParts.push({
+					content: attachment.content,
+					contentType: attachment.contentType,
+					contentDisposition: 'inline',
+					filename: attachment.filename || undefined,
+					cid: attachment.cid || undefined,
+				});
+			}
+		}
+
+		for (const attachment of attachments) {
+			fileParts.push({
+				content: attachment.content,
+				contentType: attachment.contentType,
+				contentDisposition: 'attachment',
+				filename: attachment.filename,
+			});
+		}
+
+		const additionalHeaders = extractAdditionalHeaders(parsed.headers);
+		const mailOptions: Mail.Options = {
+			from: addressToString(parsed.from),
+			to: addressToString(parsed.to),
+			cc: addressToString(parsed.cc),
+			bcc: addressToString(parsed.bcc),
+			replyTo: addressToString(parsed.replyTo),
+			subject: parsed.subject,
+			messageId: parsed.messageId,
+			date: parsed.date,
+			inReplyTo: parsed.inReplyTo,
+			references: Array.isArray(parsed.references)
+				? parsed.references.join(' ')
+				: parsed.references,
+			text: parsed.text || undefined,
+			html: parsed.html || undefined,
+			attachments: [...inlineParts, ...fileParts],
+			headers: additionalHeaders,
+		};
+
+		const composer = new MailComposer(mailOptions);
+		const builtMessage = composer.compile();
+		const stream = builtMessage.createReadStream();
+
+		return await new Promise<Buffer>((resolve, reject) => {
+			const chunks: Buffer[] = [];
+			stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+			stream.on('end', () => resolve(Buffer.concat(chunks)));
+			stream.on('error', reject);
+		});
+	} catch (error) {
+		logger.warn({ error }, 'Failed to rebuild export .eml — returning stored body.');
+		return emlBuffer;
+	}
+}
+
+/** Escape mbox message body lines that start with "From ". */
+export function escapeMboxFromLines(emlBuffer: Buffer): Buffer {
+	const text = emlBuffer.toString('utf8');
+	const escaped = text.replace(/^From /gm, '>From ');
+	return Buffer.from(escaped, 'utf8');
+}
+
+/** Build mbox "From " envelope line for a message. */
+export function formatMboxFromLine(senderEmail: string, sentAt: Date): string {
+	const safeSender = senderEmail?.includes('@') ? senderEmail : 'unknown@local';
+	return `From ${safeSender} ${sentAt.toUTCString()}\n`;
+}

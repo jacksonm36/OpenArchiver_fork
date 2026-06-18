@@ -46,6 +46,8 @@ export interface LocalStorageConfig {
 	rootPath: string;
 	openArchiverFolderName: string;
 	encryptionKey?: string;
+	/** When true, new files are gzip-compressed before optional encryption. */
+	compress?: boolean;
 }
 
 /**
@@ -68,6 +70,8 @@ export interface S3StorageConfig {
 	forcePathStyle?: boolean;
 	openArchiverFolderName: string;
 	encryptionKey?: string;
+	/** When true, new files are gzip-compressed before optional encryption. */
+	compress?: boolean;
 }
 
 export type StorageConfig = LocalStorageConfig | S3StorageConfig;

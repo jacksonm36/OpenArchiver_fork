@@ -34,6 +34,9 @@ COMPOSE_DIR=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
+# shellcheck source=backup-critical.sh
+source "${SCRIPT_DIR}/backup-critical.sh"
+
 msg() { echo -e "\e[34m[migrate]\e[0m $*"; }
 ok()  { echo -e "\e[32m[ ok ]\e[0m $*"; }
 warn(){ echo -e "\e[33m[warn]\e[0m $*"; }
@@ -114,46 +117,14 @@ resolve_data_dir() {
 backup_all() {
   [[ "$SKIP_BACKUP" -eq 1 ]] && { warn "Skipping backup (--skip-backup)"; return 0; }
 
-  local ts
-  ts="$(date +%Y%m%d-%H%M%S)"
-  BACKUP_DIR="${BACKUP_DIR:-./openarchiver-migration-backup-${ts}}"
-  mkdir -p "$BACKUP_DIR"
-  msg "Backup directory: $BACKUP_DIR"
-
-  case "$MODE" in
-    docker)
-      load_env_file "${COMPOSE_DIR}/.env"
-      cp -a "${COMPOSE_DIR}/.env" "${BACKUP_DIR}/.env" 2>/dev/null || true
-      cp -a "${COMPOSE_DIR}/docker-compose.yml" "${BACKUP_DIR}/" 2>/dev/null || true
-
-      msg "PostgreSQL dump..."
-      run docker compose -f "${COMPOSE_DIR}/docker-compose.yml" exec -T postgres \
-        pg_dump -U "${POSTGRES_USER:-admin}" "${POSTGRES_DB:-open_archive}" \
-        >"${BACKUP_DIR}/postgres.sql"
-
-      msg "Archiving email storage (${DATA_DIR})..."
-      if [[ -d "$DATA_DIR" ]]; then
-        run tar -czf "${BACKUP_DIR}/storage.tar.gz" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")"
-      fi
-      ;;
-    bare-metal|git)
-      cp -a "${OA_DIR}/.env" "${BACKUP_DIR}/.env" 2>/dev/null || true
-      msg "PostgreSQL dump..."
-      load_env_file "${OA_DIR}/.env"
-      if command -v pg_dump >/dev/null 2>&1; then
-        run pg_dump "$DATABASE_URL" >"${BACKUP_DIR}/postgres.sql" 2>/dev/null || \
-          run sudo -u postgres pg_dump "${POSTGRES_DB}" >"${BACKUP_DIR}/postgres.sql"
-      else
-        warn "pg_dump not found — back up PostgreSQL manually"
-      fi
-      if [[ -d "$DATA_DIR" ]]; then
-        msg "Archiving email storage..."
-        run tar -czf "${BACKUP_DIR}/storage.tar.gz" -C "$(dirname "$DATA_DIR")" "$(basename "$DATA_DIR")"
-      fi
-      ;;
-  esac
-
-  ok "Backup complete: $BACKUP_DIR"
+  BC_MODE="$MODE"
+  BC_OA_DIR="$OA_DIR"
+  BC_COMPOSE_DIR="${COMPOSE_DIR:-}"
+  BC_DATA_DIR="$DATA_DIR"
+  BC_BACKUP_DIR="$BACKUP_DIR"
+  BC_DRY_RUN="$DRY_RUN"
+  backup_critical
+  BACKUP_DIR="${BACKUP_DIR:-$BC_BACKUP_DIR}"
 }
 
 stop_services() {
@@ -276,11 +247,12 @@ App dir:     ${OA_DIR:-$COMPOSE_DIR}
 Data dir:    ${DATA_DIR}
 Backup:      ${BACKUP_DIR:-skipped}
 
-Preserved:
-  - PostgreSQL (ingestion sources, archived emails, users, roles, audit logs)
-  - Email files on disk (${DATA_DIR})
-  - Meilisearch volume (search re-index queued for new fields)
-  - .env secrets (JWT, encryption key, DB passwords)
+Backed up automatically (see backup-manifest.txt):
+  - PostgreSQL (postgres.sql + postgres.dump + optional pgdata volume)
+  - .env (JWT, ENCRYPTION_KEY, STORAGE_ENCRYPTION_KEY, DB/Redis/Meili secrets)
+  - Email storage tarball (${DATA_DIR})
+  - Meilisearch volume + API dump trigger
+  - Valkey/Redis RDB + volume (job queues)
 
 New in fork:
   - Fast PST ingest, resource profiles, advanced search, dedup index (#394)

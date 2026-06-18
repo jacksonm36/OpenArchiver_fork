@@ -34,6 +34,7 @@ import path from 'path';
 import { logger } from '../config/logger';
 import { rateLimiter } from './middleware/rateLimiter';
 import { config } from '../config';
+import { getResourceStatus } from '../config/resources';
 import { OpenArchiverFeature } from '@open-archiver/types';
 // Define the "plugin" interface
 export interface ArchiverModule {
@@ -166,11 +167,10 @@ export async function createServer(modules: ArchiverModule[] = []): Promise<Expr
 	logger.info('✅ Core OSS modules loaded.');
 	logger.info(
 		{
-			resourceProfile: config.resources.profile,
-			indexingBatchSize: config.resources.indexingBatchSize,
+			...getResourceStatus(),
 			syncFrequency: config.app.syncFrequency,
 		},
-		'Resource profile active'
+		'Resource profile active (auto-tuned from detected RAM/CPU)'
 	);
 
 	return app;

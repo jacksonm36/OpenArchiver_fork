@@ -3,6 +3,11 @@ import 'dotenv/config';
 
 const storageType = process.env.STORAGE_TYPE;
 const encryptionKey = process.env.STORAGE_ENCRYPTION_KEY;
+/** Gzip emails/attachments at rest (transparent on read — exports get standard .eml bytes). */
+const storageCompress =
+	process.env.STORAGE_COMPRESS === undefined
+		? true
+		: process.env.STORAGE_COMPRESS === 'true';
 const openArchiverFolderName = 'open-archiver';
 let storageConfig: StorageConfig;
 
@@ -19,6 +24,7 @@ if (storageType === 'local') {
 		rootPath: process.env.STORAGE_LOCAL_ROOT_PATH,
 		openArchiverFolderName: openArchiverFolderName,
 		encryptionKey: encryptionKey,
+		compress: storageCompress,
 	};
 } else if (storageType === 's3') {
 	if (
@@ -39,6 +45,7 @@ if (storageType === 'local') {
 		forcePathStyle: process.env.STORAGE_S3_FORCE_PATH_STYLE === 'true',
 		openArchiverFolderName: openArchiverFolderName,
 		encryptionKey: encryptionKey,
+		compress: storageCompress,
 	};
 } else {
 	throw new Error(`Invalid STORAGE_TYPE: ${storageType}`);

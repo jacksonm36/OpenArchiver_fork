@@ -1,5 +1,8 @@
 import { Request, Response } from 'express';
 import { JobsService } from '../../services/JobsService';
+import { healthService } from '../../services/HealthService';
+import { activityLogService } from '../../services/ActivityLogService';
+import { getResourceStatus } from '../../config/resources';
 import {
 	IGetQueueJobsRequestParams,
 	IGetQueueJobsRequestQuery,
@@ -37,6 +40,20 @@ export class JobsController {
 			res.status(200).json(queueDetails);
 		} catch (error) {
 			res.status(500).json({ message: 'Error fetching queue jobs', error });
+		}
+	};
+
+	public getMonitor = async (req: Request, res: Response) => {
+		try {
+			const since = typeof req.query.since === 'string' ? req.query.since : undefined;
+			const [health, events, queues] = await Promise.all([
+				healthService.check(),
+				activityLogService.getSince(since),
+				this.jobsService.getQueues(),
+			]);
+			res.status(200).json({ health, events, queues, resources: getResourceStatus() });
+		} catch (error) {
+			res.status(500).json({ message: 'Error fetching monitor data', error });
 		}
 	};
 }

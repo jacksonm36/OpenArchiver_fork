@@ -1,5 +1,6 @@
 import { relations } from 'drizzle-orm';
-import { boolean, jsonb, pgTable, text, timestamp, uuid, bigint, index } from 'drizzle-orm/pg-core';
+import { boolean, jsonb, pgTable, text, timestamp, uuid, bigint, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 import { ingestionSources } from './ingestion-sources';
 
 export const archivedEmails = pgTable(
@@ -34,7 +35,9 @@ export const archivedEmails = pgTable(
 	(table) => [
 		index('thread_id_idx').on(table.threadId),
 		index('provider_msg_source_idx').on(table.providerMessageId, table.ingestionSourceId),
-		index('msgid_header_source_idx').on(table.messageIdHeader, table.ingestionSourceId),
+		uniqueIndex('message_id_header_source_unique_idx')
+			.on(table.messageIdHeader, table.ingestionSourceId)
+			.where(sql`${table.messageIdHeader} is not null`),
 	]
 );
 

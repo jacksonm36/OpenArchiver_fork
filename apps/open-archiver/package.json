@@ -5,7 +5,7 @@
 	"scripts": {
 		"dev": "ts-node-dev --respawn --transpile-only index.ts",
 		"build": "tsc",
-		"start": "node dist/index.js"
+		"start": "node ../../scripts/run-node-with-heap.mjs dist/index.js"
 	},
 	"dependencies": {
 		"@open-archiver/backend": "workspace:*",

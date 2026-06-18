@@ -1,7 +1,16 @@
 import type { EmailAddress } from '@open-archiver/types';
-import type { PSTMessage } from 'pst-extractor';
+import type { PSTMessage, PSTAttachment } from 'pst-extractor';
 import { createHash } from 'crypto';
-
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
+import { createWriteStream } from 'fs';
+import { finished } from 'stream/promises';
+import {
+	PST_ATTACHMENT_READ_CHUNK,
+	readPstAttachmentToBuffer,
+	createPstAttachmentContentReader,
+} from './pstAttachmentStream';
 const BOUNDARY = '----boundary-openarchiver';
 const ALT_BOUNDARY = '----boundary-openarchiver_alt';
 
@@ -37,21 +46,41 @@ export function buildPstHeadersMap(msg: PSTMessage): Map<string, string | string
 		headers.set('message-id', `<${msg.internetMessageId}>`);
 	}
 	if (msg.inReplyToId) {
-		headers.set('in-reply-to', msg.inReplyToId);
+		const inReplyTo =
+			typeof msg.inReplyToId === 'string' ? msg.inReplyToId : String(msg.inReplyToId);
+		headers.set('in-reply-to', inReplyTo);
 	}
 	if (msg.conversationId) {
-		headers.set('conversation-id', msg.conversationId);
+		const conversationId =
+			typeof msg.conversationId === 'string'
+				? msg.conversationId
+				: Buffer.isBuffer(msg.conversationId)
+					? msg.conversationId.toString('utf8')
+					: String(msg.conversationId);
+		headers.set('conversation-id', conversationId);
 	}
 
 	return headers;
 }
 
 export function getPstThreadId(msg: PSTMessage): string | undefined {
-	if (msg.inReplyToId) {
-		return msg.inReplyToId.trim();
+	const inReplyTo =
+		typeof msg.inReplyToId === 'string'
+			? msg.inReplyToId
+			: msg.inReplyToId
+				? String(msg.inReplyToId)
+				: undefined;
+	if (inReplyTo) {
+		return inReplyTo.trim();
 	}
-	if (msg.conversationId) {
-		return msg.conversationId.trim();
+	const conversationId =
+		typeof msg.conversationId === 'string'
+			? msg.conversationId
+			: msg.conversationId
+				? String(msg.conversationId)
+				: undefined;
+	if (conversationId) {
+		return conversationId.trim();
 	}
 	if (msg.internetMessageId) {
 		return `<${msg.internetMessageId}>`;
@@ -130,6 +159,118 @@ export function buildBodyOnlyEml(msg: PSTMessage): Buffer {
 	return Buffer.from(eml, 'utf-8');
 }
 
+async function writeStreamChunk(
+	writeStream: NodeJS.WritableStream,
+	data: string | Buffer
+): Promise<void> {
+	const chunk = typeof data === 'string' ? Buffer.from(data, 'utf-8') : data;
+	const canContinue = writeStream.write(chunk);
+	if (!canContinue) {
+		await new Promise<void>((resolve, reject) => {
+			writeStream.once('drain', resolve);
+			writeStream.once('error', reject);
+		});
+	}
+}
+
+async function streamPstAttachmentAsBase64(
+	attachment: PSTAttachment,
+	writeStream: NodeJS.WritableStream
+): Promise<void> {
+	const attachmentStream = attachment.fileInputStream;
+	if (!attachmentStream) {
+		return;
+	}
+
+	const readBuffer = Buffer.alloc(PST_ATTACHMENT_READ_CHUNK);
+	let bytesRead: number;
+	do {
+		bytesRead = attachmentStream.read(readBuffer);
+		if (bytesRead > 0) {
+			await writeStreamChunk(
+				writeStream,
+				readBuffer.subarray(0, bytesRead).toString('base64')
+			);
+		}
+	} while (bytesRead === PST_ATTACHMENT_READ_CHUNK);
+}
+
+/**
+ * Full EML including attachment payloads for preserve-original (GoBD) mode.
+ * When streamAttachments is true, writes directly to a temp file without holding
+ * attachment bytes in memory.
+ */
+export async function buildFullEmlToTemp(
+	msg: PSTMessage,
+	streamAttachments: boolean
+): Promise<{ tempFilePath: string; buffer: Buffer }> {
+	if (!streamAttachments) {
+		const buffer = buildFullEml(msg);
+		return { buffer, tempFilePath: '' };
+	}
+
+	const tempFilePath = join(tmpdir(), `oa-email-${randomUUID()}.eml`);
+	const writeStream = createWriteStream(tempFilePath);
+	const headerBlock = buildHeaderBlock(msg);
+
+	try {
+		if (msg.hasAttachments) {
+			await writeStreamChunk(
+				writeStream,
+				`${headerBlock}Content-Type: multipart/mixed; boundary="${BOUNDARY}"\n\n--${BOUNDARY}\nContent-Type: multipart/alternative; boundary="${ALT_BOUNDARY}"\n\n`
+			);
+		} else {
+			await writeStreamChunk(
+				writeStream,
+				`${headerBlock}Content-Type: multipart/alternative; boundary="${ALT_BOUNDARY}"\n\n`
+			);
+		}
+
+		if (msg.body) {
+			await writeStreamChunk(
+				writeStream,
+				`--${ALT_BOUNDARY}\nContent-Type: text/plain; charset="utf-8"\n\n${msg.body}\n\n`
+			);
+		}
+
+		if (msg.bodyHTML) {
+			await writeStreamChunk(
+				writeStream,
+				`--${ALT_BOUNDARY}\nContent-Type: text/html; charset="utf-8"\n\n${msg.bodyHTML}\n\n`
+			);
+		}
+
+		if (msg.body || msg.bodyHTML) {
+			await writeStreamChunk(writeStream, `--${ALT_BOUNDARY}--\n`);
+		}
+
+		if (msg.hasAttachments) {
+			for (let i = 0; i < msg.numberOfAttachments; i++) {
+				const attachment = msg.getAttachment(i);
+				const attachmentStream = attachment.fileInputStream;
+				if (!attachmentStream) {
+					continue;
+				}
+
+				await writeStreamChunk(
+					writeStream,
+					`\n--${BOUNDARY}\nContent-Type: ${attachment.mimeTag}; name="${attachment.longFilename}"\nContent-Disposition: attachment; filename="${attachment.longFilename}"\nContent-Transfer-Encoding: base64\n\n`
+				);
+				await streamPstAttachmentAsBase64(attachment, writeStream);
+				await writeStreamChunk(writeStream, '\n');
+			}
+
+			await writeStreamChunk(writeStream, `\n--${BOUNDARY}--`);
+		}
+
+		writeStream.end();
+		await finished(writeStream);
+		return { tempFilePath, buffer: Buffer.alloc(0) };
+	} catch (error) {
+		writeStream.destroy();
+		throw error;
+	}
+}
 /**
  * Full EML including attachment payloads for preserve-original (GoBD) mode.
  */
@@ -183,8 +324,7 @@ export function buildFullEml(msg: PSTMessage): Buffer {
 				continue;
 			}
 
-			const attachmentBuffer = Buffer.alloc(attachment.filesize);
-			attachmentStream.readCompletely(attachmentBuffer);
+			const attachmentBuffer = readPstAttachmentToBuffer(attachment);
 
 			parts.push(
 				Buffer.from(
@@ -202,16 +342,33 @@ export function buildFullEml(msg: PSTMessage): Buffer {
 	return Buffer.concat(parts);
 }
 
-export function extractPstAttachments(
+/** Extract PST attachments for separate storage (default ingestion mode). */
+export async function extractPstAttachmentsAsync(
 	msg: PSTMessage,
-	preserveOriginalFile: boolean
-): { filename: string; contentType: string; size: number; content: Buffer }[] {
+	preserveOriginalFile: boolean,
+	streamAttachments: boolean
+): Promise<
+	{
+		filename: string;
+		contentType: string;
+		size: number;
+		content: Buffer;
+		tempFilePath?: string;
+		readContent?: () => NodeJS.ReadableStream;
+	}[]
+> {
 	if (preserveOriginalFile || !msg.hasAttachments) {
 		return [];
 	}
 
-	const attachments: { filename: string; contentType: string; size: number; content: Buffer }[] =
-		[];
+	const attachments: {
+		filename: string;
+		contentType: string;
+		size: number;
+		content: Buffer;
+		tempFilePath?: string;
+		readContent?: () => NodeJS.ReadableStream;
+	}[] = [];
 
 	for (let i = 0; i < msg.numberOfAttachments; i++) {
 		const attachment = msg.getAttachment(i);
@@ -220,15 +377,26 @@ export function extractPstAttachments(
 			continue;
 		}
 
-		const attachmentBuffer = Buffer.alloc(attachment.filesize);
-		attachmentStream.readCompletely(attachmentBuffer);
-
-		attachments.push({
+		const meta = {
 			filename: attachment.longFilename || attachment.filename || 'untitled',
 			contentType: attachment.mimeTag || 'application/octet-stream',
-			size: attachment.filesize,
-			content: attachmentBuffer,
-		});
+		};
+
+		if (streamAttachments) {
+			attachments.push({
+				...meta,
+				size: attachment.filesize,
+				content: Buffer.alloc(0),
+				readContent: createPstAttachmentContentReader(attachment),
+			});
+		} else {
+			const attachmentBuffer = readPstAttachmentToBuffer(attachment);
+			attachments.push({
+				...meta,
+				size: attachment.filesize,
+				content: attachmentBuffer,
+			});
+		}
 	}
 
 	return attachments;

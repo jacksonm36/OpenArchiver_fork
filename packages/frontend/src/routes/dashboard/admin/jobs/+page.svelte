@@ -3,9 +3,10 @@
 	import * as Card from '$lib/components/ui/card';
 	import { t } from '$lib/translations';
 	import { Badge } from '$lib/components/ui/badge';
+	import JobActivityStream from '$lib/components/custom/JobActivityStream.svelte';
 
 	let { data }: { data: PageData } = $props();
-	let queues = $derived(data.queues);
+	let queues = $state(data.queues);
 </script>
 
 <svelte:head>
@@ -55,4 +56,6 @@
 			</a>
 		{/each}
 	</div>
+
+	<JobActivityStream onQueuesUpdate={(updated) => (queues = updated)} />
 </div>

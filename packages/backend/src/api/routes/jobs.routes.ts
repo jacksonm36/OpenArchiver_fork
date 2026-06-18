@@ -131,5 +131,11 @@ export const createJobsRouter = (authService: AuthService): Router => {
 		jobsController.getQueueJobs
 	);
 
+	router.get(
+		'/monitor',
+		requirePermission('manage', 'all', 'user.requiresSuperAdminRole'),
+		jobsController.getMonitor
+	);
+
 	return router;
 };

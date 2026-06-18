@@ -13,6 +13,18 @@ export const createArchivedEmailRouter = (
 	// Secure all routes in this module
 	router.use(requireAuth(authService));
 
+	router.get(
+		'/export/mbox',
+		requirePermission('read', 'archive'),
+		archivedEmailController.exportMbox
+	);
+
+	router.get(
+		'/export/zip',
+		requirePermission('read', 'archive'),
+		archivedEmailController.exportZip
+	);
+
 	/**
 	 * @openapi
 	 * /v1/archived-emails/ingestion-source/{ingestionSourceId}:
@@ -133,6 +145,12 @@ export const createArchivedEmailRouter = (
 	 *       '500':
 	 *         $ref: '#/components/responses/InternalServerError'
 	 */
+	router.get(
+		'/:id/export/eml',
+		requirePermission('read', 'archive'),
+		archivedEmailController.exportSingleEml
+	);
+
 	router.get(
 		'/:id',
 		requirePermission('read', 'archive'),

@@ -1,3 +1,14 @@
+/** Resume position for PST / EML zip / Mbox file imports. */
+export interface FileImportCheckpoint {
+	/** 0-based index of the last handled message (imported or dedup-skipped). */
+	lastGlobalIndex: number;
+	lastMessageId?: string;
+	/** PST folder path or zip entry path when available. */
+	lastPath?: string;
+	/** Set when the file was fully processed. */
+	complete?: boolean;
+}
+
 export type SyncState = {
 	google?: {
 		[userEmail: string]: {
@@ -14,9 +25,24 @@ export type SyncState = {
 			maxUid: number;
 		};
 	};
+	/** Per-mailbox resume checkpoints for file-based imports. */
+	fileImport?: {
+		[userEmail: string]: FileImportCheckpoint;
+	};
 	lastSyncTimestamp?: string;
 	statusMessage?: string;
 };
+
+/** How a resumed file import should behave after an error. */
+export type ResumeImportMode = 'import' | 'dedup';
+
+export interface ResumeImportDto {
+	/**
+	 * `import` — continue storing new messages from the last checkpoint (default).
+	 * `dedup` — fast-forward through already-archived messages only (checkpoint + duplicate skip).
+	 */
+	mode?: ResumeImportMode;
+}
 
 export type IngestionProvider =
 	| 'google_workspace'
@@ -124,6 +150,8 @@ export interface IngestionSource {
 	/** When true, the raw EML file is stored without any modification (no attachment
 	 * stripping). Required for GoBD / SEC 17a-4 compliance. Defaults to false. */
 	preserveOriginalFile: boolean;
+	/** Stream file-import attachments to disk in fixed-size chunks (low RAM). Default true. */
+	streamAttachmentsOnImport: boolean;
 	/** The ID of the root ingestion source this child is merged into.
 	 *  Null or undefined when this source is a standalone root. */
 	mergedIntoId?: string | null;
@@ -142,8 +170,31 @@ export interface CreateIngestionSourceDto {
 	providerConfig: Record<string, any>;
 	/** Store the unmodified raw EML for GoBD compliance. Defaults to false. */
 	preserveOriginalFile?: boolean;
+	/** Stream PST/file attachments to temp files during import. Defaults to true. */
+	streamAttachmentsOnImport?: boolean;
 	/** Merge this new source into an existing root source's group. */
 	mergedIntoId?: string;
+}
+
+/** Server-side file import configuration exposed to the UI. */
+export interface IImportSettings {
+	localPathOnly: boolean;
+	maxUploadMb: number;
+	allowedRoots: string[];
+	suggestedImportDir: string;
+}
+
+export interface IImportDirectoryEntry {
+	name: string;
+	path: string;
+	isDirectory: boolean;
+	sizeBytes?: number;
+}
+
+export interface IImportDirectoryListing {
+	directory: string;
+	allowedRoots: string[];
+	entries: IImportDirectoryEntry[];
 }
 
 export interface UpdateIngestionSourceDto {
@@ -157,6 +208,8 @@ export interface UpdateIngestionSourceDto {
 	syncState?: SyncState;
 	/** Set or clear the merge parent. Use null to unmerge. */
 	mergedIntoId?: string | null;
+	preserveOriginalFile?: boolean;
+	streamAttachmentsOnImport?: boolean;
 }
 
 export interface IngestionQueueJobSummary {
@@ -202,6 +255,13 @@ export interface IngestionDiagnostics {
 		label: string;
 		isIndeterminate: boolean;
 	};
+	/** Present when a file-based import can resume from a saved checkpoint. */
+	resume?: {
+		available: boolean;
+		lastGlobalIndex: number | null;
+		lastMessageId?: string | null;
+		lastPath?: string | null;
+	};
 }
 
 export interface IContinuousSyncJob {
@@ -210,6 +270,7 @@ export interface IContinuousSyncJob {
 
 export interface IInitialImportJob {
 	ingestionSourceId: string;
+	resumeMode?: ResumeImportMode;
 }
 
 export interface IProcessMailboxJob {
@@ -217,6 +278,10 @@ export interface IProcessMailboxJob {
 	userEmail: string;
 	/** ID of the SyncSession tracking this sync cycle's progress */
 	sessionId: string;
+	/** When set on a resumed file import, controls import vs dedup-only fast-forward. */
+	resumeMode?: ResumeImportMode;
+	/** True when dispatched from the initial-import master job. */
+	isInitialImport?: boolean;
 }
 
 export interface IPstProcessingJob {

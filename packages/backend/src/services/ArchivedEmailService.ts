@@ -23,6 +23,7 @@ import { User } from '@open-archiver/types';
 import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { RetentionHook } from '../hooks/RetentionHook';
 import { logger } from '../config/logger';
+import { MAX_RAW_EMAIL_API_BYTES } from '../config/emailApi';
 
 interface DbRecipients {
 	to: { name: string; address: string }[];
@@ -166,12 +167,16 @@ export class ArchivedEmailService {
 
 		const storage = new StorageService();
 		const rawStream = await storage.get(email.storagePath);
-		const raw = await streamToBuffer(rawStream as Readable);
+		const rawBuffer = await streamToBuffer(rawStream as Readable);
+
+		const rawTooLarge = rawBuffer.length > MAX_RAW_EMAIL_API_BYTES;
 
 		const mappedEmail = {
 			...email,
 			recipients: this.mapRecipients(email.recipients),
-			raw,
+			raw: rawTooLarge ? undefined : rawBuffer.toString('base64'),
+			rawTooLarge,
+			rawSizeBytes: rawBuffer.length,
 			thread: threadEmails,
 			tags: (email.tags as string[] | null) || null,
 			path: email.path || null,

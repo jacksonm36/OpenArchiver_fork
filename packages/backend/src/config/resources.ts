@@ -1,10 +1,13 @@
 import 'dotenv/config';
-import os from 'os';
+import type { SystemCapacity } from './systemCapacity';
+import { detectSystemCapacity } from './systemCapacity';
 
-export type ResourceProfileName = 'low' | 'balanced' | 'high';
+export type ResourceProfileName = 'low' | 'balanced' | 'high' | 'auto';
 
 export interface ResourceSettings {
 	profile: ResourceProfileName;
+	profileSource: 'auto' | 'manual';
+	capacity: SystemCapacity;
 	ingestionWorkerConcurrency: number;
 	indexingWorkerConcurrency: number;
 	indexingEmailConcurrency: number;
@@ -26,14 +29,14 @@ interface ProfileDefaults {
 	nodeMaxOldSpaceMb: number;
 }
 
-/** Tuned for ~6 GB RAM and 4 CPU cores (Docker or bare metal). */
+/** Tuned for ~6 GB RAM and 4 CPU cores (native install or Docker). */
 const LOW_PROFILE: ProfileDefaults = {
 	ingestionWorkerConcurrency: 1,
 	indexingWorkerConcurrency: 1,
 	indexingEmailConcurrency: 2,
-	indexingAttachmentConcurrency: 2,
-	attachmentStorageConcurrency: 2,
-	indexingBatchSize: 25,
+	indexingAttachmentConcurrency: 1,
+	attachmentStorageConcurrency: 1,
+	indexingBatchSize: 20,
 	syncFrequency: '*/15 * * * *',
 	nodeMaxOldSpaceMb: 1024,
 };
@@ -62,37 +65,71 @@ const HIGH_PROFILE: ProfileDefaults = {
 	nodeMaxOldSpaceMb: 2048,
 };
 
-const PROFILE_DEFAULTS: Record<ResourceProfileName, ProfileDefaults> = {
+const PROFILE_DEFAULTS: Record<'low' | 'balanced' | 'high', ProfileDefaults> = {
 	low: LOW_PROFILE,
 	balanced: BALANCED_PROFILE,
 	high: HIGH_PROFILE,
 };
 
-function detectProfile(): ResourceProfileName {
-	const totalGb = os.totalmem() / 1024 ** 3;
-	const cpus = os.cpus().length;
+function clamp(value: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, value));
+}
 
-	// Typical 6 GB machines report ~5.8–6.5 GB to Node.
-	if (totalGb < 8 || (totalGb < 10 && cpus <= 4)) {
+function detectProfileBucket(capacity: SystemCapacity): 'low' | 'balanced' | 'high' {
+	const { effectiveMemGb: mem, effectiveCpus: cpus } = capacity;
+
+	if (mem < 8 || (mem < 10 && cpus <= 4)) {
 		return 'low';
 	}
-	if (totalGb < 16) {
+	if (mem < 16) {
 		return 'balanced';
 	}
 	return 'high';
 }
 
-function resolveProfileName(): ResourceProfileName {
+/** Continuous tuning from detected RAM/CPU (used when RESOURCE_PROFILE=auto). */
+function computeAutoDefaults(capacity: SystemCapacity): ProfileDefaults {
+	const mem = capacity.effectiveMemGb;
+	const cpus = capacity.effectiveCpus;
+
+	const reservedGb = mem <= 6 ? 2.5 : mem <= 10 ? 3 : mem <= 20 ? 4 : 5;
+	const appMemGb = Math.max(1, mem - reservedGb);
+	const nodeProcessCount = 3;
+
+	return {
+		ingestionWorkerConcurrency: clamp(Math.floor(cpus / 4) || 1, 1, 5),
+		indexingWorkerConcurrency: clamp(Math.floor(cpus / 4) || 1, 1, 3),
+		indexingEmailConcurrency: clamp(Math.floor(cpus / 2) || 1, 1, 12),
+		indexingAttachmentConcurrency: clamp(Math.floor(cpus / 3) || 1, 1, 6),
+		attachmentStorageConcurrency: clamp(Math.floor(cpus / 3) || 1, 1, 6),
+		indexingBatchSize: clamp(Math.round(mem * 2.5), 15, 100),
+		syncFrequency: mem < 8 ? '*/15 * * * *' : mem < 16 ? '*/5 * * * *' : '*/2 * * * *',
+		nodeMaxOldSpaceMb: clamp(
+			Math.floor((appMemGb * 1024) / nodeProcessCount / 2),
+			512,
+			3072
+		),
+	};
+}
+
+function resolveProfile(capacity: SystemCapacity): {
+	profile: ResourceProfileName;
+	profileSource: 'auto' | 'manual';
+	defaults: ProfileDefaults;
+} {
 	const raw = (process.env.RESOURCE_PROFILE || 'auto').toLowerCase();
 
 	if (raw === 'auto') {
-		return detectProfile();
-	}
-	if (raw === 'low' || raw === 'balanced' || raw === 'high') {
-		return raw;
+		const defaults = computeAutoDefaults(capacity);
+		const bucket = detectProfileBucket(capacity);
+		return { profile: bucket, profileSource: 'auto', defaults };
 	}
 
-	return 'balanced';
+	if (raw === 'low' || raw === 'balanced' || raw === 'high') {
+		return { profile: raw, profileSource: 'manual', defaults: PROFILE_DEFAULTS[raw] };
+	}
+
+	return { profile: 'balanced', profileSource: 'manual', defaults: PROFILE_DEFAULTS.balanced };
 }
 
 function readIntEnv(key: string, fallback: number): number {
@@ -105,11 +142,13 @@ function readIntEnv(key: string, fallback: number): number {
 }
 
 function buildResourceSettings(): ResourceSettings {
-	const profile = resolveProfileName();
-	const defaults = PROFILE_DEFAULTS[profile];
+	const capacity = detectSystemCapacity();
+	const { profile, profileSource, defaults } = resolveProfile(capacity);
 
 	return {
 		profile,
+		profileSource,
+		capacity,
 		ingestionWorkerConcurrency: readIntEnv(
 			'INGESTION_WORKER_CONCURRENCY',
 			defaults.ingestionWorkerConcurrency
@@ -137,3 +176,22 @@ function buildResourceSettings(): ResourceSettings {
 }
 
 export const resources = buildResourceSettings();
+
+/** Snapshot for monitor API and startup logs. */
+export function getResourceStatus() {
+	return {
+		capacity: resources.capacity,
+		tuning: {
+			profile: resources.profile,
+			profileSource: resources.profileSource,
+			ingestionWorkerConcurrency: resources.ingestionWorkerConcurrency,
+			indexingWorkerConcurrency: resources.indexingWorkerConcurrency,
+			indexingEmailConcurrency: resources.indexingEmailConcurrency,
+			indexingAttachmentConcurrency: resources.indexingAttachmentConcurrency,
+			attachmentStorageConcurrency: resources.attachmentStorageConcurrency,
+			indexingBatchSize: resources.indexingBatchSize,
+			syncFrequency: resources.syncFrequency,
+			nodeMaxOldSpaceMb: resources.nodeMaxOldSpaceMb,
+		},
+	};
+}

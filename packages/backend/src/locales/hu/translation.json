@@ -1,0 +1,78 @@
+{
+	"auth": {
+		"setup": {
+			"allFieldsRequired": "Az e-mail-cím, a jelszó és a név megadása kötelező",
+			"alreadyCompleted": "A telepítés már befejeződött."
+		},
+		"login": {
+			"emailAndPasswordRequired": "Az e-mail-cím és a jelszó megadása kötelező",
+			"invalidCredentials": "Érvénytelen bejelentkezési adatok"
+		}
+	},
+	"errors": {
+		"internalServerError": "Belső szerverhiba történt",
+		"demoMode": "Ez a művelet demó módban nem engedélyezett.",
+		"unauthorized": "Jogosulatlan",
+		"unknown": "Ismeretlen hiba történt",
+		"noPermissionToAction": "Nincs jogosultsága az aktuális művelet végrehajtásához.",
+		"deletion_disabled": "A törlés le van tiltva ezen a példányon."
+	},
+	"user": {
+		"notFound": "Felhasználó nem található",
+		"cannotDeleteOnlyUser": "Az adatbázis egyetlen felhasználóját nem lehet törölni.",
+		"requiresSuperAdminRole": "A felhasználók kezeléséhez Super Admin szerepkör szükséges."
+	},
+	"iam": {
+		"failedToGetRoles": "A szerepkörök lekérése sikertelen.",
+		"roleNotFound": "Szerepkör nem található.",
+		"failedToGetRole": "A szerepkör lekérése sikertelen.",
+		"missingRoleFields": "Hiányzó kötelező mezők: név és házirend.",
+		"invalidPolicy": "Érvénytelen házirend-utasítás:",
+		"failedToCreateRole": "A szerepkör létrehozása sikertelen.",
+		"failedToDeleteRole": "A szerepkör törlése sikertelen.",
+		"missingUpdateFields": "Hiányzó frissítendő mezők: név vagy házirendek.",
+		"failedToUpdateRole": "A szerepkör frissítése sikertelen.",
+		"requiresSuperAdminRole": "A szerepkörök kezeléséhez Super Admin szerepkör szükséges."
+	},
+	"settings": {
+		"failedToRetrieve": "A beállítások lekérése sikertelen",
+		"failedToUpdate": "A beállítások frissítése sikertelen",
+		"noPermissionToUpdate": "Nincs jogosultsága a rendszerbeállítások módosításához."
+	},
+	"dashboard": {
+		"permissionRequired": "Az irányítópult adatainak megtekintéséhez irányítópult-olvasási jogosultság szükséges."
+	},
+	"ingestion": {
+		"failedToCreate": "A betöltési forrás létrehozása kapcsolódási hiba miatt sikertelen.",
+		"notFound": "Betöltési forrás nem található",
+		"initialImportTriggered": "A kezdeti import sikeresen elindítva.",
+		"resumeImportTriggered": "Az import folytatása sikeresen sorba állítva.",
+		"forceSyncTriggered": "A kényszerített szinkronizálás sikeresen elindítva."
+	},
+	"archivedEmail": {
+		"notFound": "Archivált e-mail nem található"
+	},
+	"search": {
+		"keywordsRequired": "Kulcsszavak megadása kötelező"
+	},
+	"storage": {
+		"filePathRequired": "Fájl elérési út megadása kötelező",
+		"invalidFilePath": "Érvénytelen fájl elérési út",
+		"fileNotFound": "A fájl nem található",
+		"downloadError": "Hiba a fájl letöltésekor"
+	},
+	"apiKeys": {
+		"generateSuccess": "API-kulcs sikeresen létrehozva.",
+		"deleteSuccess": "API-kulcs sikeresen törölve."
+	},
+	"api": {
+		"requestBodyInvalid": "Érvénytelen kérés törzse."
+	},
+	"upload": {
+		"invalid_request": "A feltöltési kérés érvénytelen vagy hibás formátumú.",
+		"stream_error": "Hiba történt a fájl fogadása közben. Kérjük, próbálja újra.",
+		"parse_error": "A feltöltött fájl adatainak feldolgozása sikertelen.",
+		"storage_error": "A feltöltött fájl mentése a tárolóba sikertelen. Kérjük, próbálja újra.",
+		"connection_error": "A kapcsolat megszakadt a feltöltés közben."
+	}
+}

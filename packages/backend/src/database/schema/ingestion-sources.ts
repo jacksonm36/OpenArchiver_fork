@@ -48,6 +48,8 @@ export const ingestionSources = pgTable(
 		lastSyncStatusMessage: text('last_sync_status_message'),
 		syncState: jsonb('sync_state'),
 		preserveOriginalFile: boolean('preserve_original_file').notNull().default(false),
+		/** When true, file imports stream attachment bytes to disk instead of loading full buffers. */
+		streamAttachmentsOnImport: boolean('stream_attachments_on_import').notNull().default(true),
 		/** Self-referencing FK for merge groups. When set, this source is a child
 		 *  whose emails are logically grouped with the root source. Flat hierarchy only. */
 		mergedIntoId: uuid('merged_into_id').references((): AnyPgColumn => ingestionSources.id, {

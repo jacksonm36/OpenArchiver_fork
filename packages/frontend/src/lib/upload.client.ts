@@ -1,6 +1,3 @@
-import { get } from 'svelte/store';
-import { authStore } from '$lib/stores/auth.store';
-
 export interface UploadProgress {
 	loaded: number;
 	total: number;
@@ -13,23 +10,20 @@ export interface UploadResult {
 }
 
 /**
- * Uploads a file with progress events. Uses the API proxy by default.
- * Large files are streamed through the proxy without buffering in memory.
+ * Uploads a file with progress events. Session auth uses the HttpOnly cookie
+ * via the SvelteKit API proxy.
  */
 export function uploadFileWithProgress(
 	file: File,
 	onProgress?: (progress: UploadProgress) => void
 ): Promise<UploadResult> {
 	return new Promise((resolve, reject) => {
-		const { accessToken } = get(authStore);
 		const xhr = new XMLHttpRequest();
 		const formData = new FormData();
 		formData.append('file', file);
 
 		xhr.open('POST', '/api/v1/upload');
-		if (accessToken) {
-			xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
-		}
+		xhr.withCredentials = true;
 
 		xhr.upload.onprogress = (event) => {
 			if (!onProgress) return;
@@ -48,10 +42,10 @@ export function uploadFileWithProgress(
 				return;
 			}
 
-			if (xhr.status >= 200 && xhr.status < 300) {
+			if (xhr.status >= 200 && xhr.status < 300 && result.filePath) {
 				resolve({
 					filePath: result.filePath,
-					originalFilename: result.originalFilename ?? file.name,
+					originalFilename: file.name,
 				});
 				return;
 			}
@@ -59,8 +53,9 @@ export function uploadFileWithProgress(
 			reject(new Error(result.message || `Upload failed (${xhr.status})`));
 		};
 
-		xhr.onerror = () => reject(new Error('Upload failed: network error'));
-		xhr.onabort = () => reject(new Error('Upload cancelled'));
+		xhr.onerror = () => {
+			reject(new Error('Upload failed: network error'));
+		};
 
 		xhr.send(formData);
 	});

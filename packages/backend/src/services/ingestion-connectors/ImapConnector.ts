@@ -23,7 +23,7 @@ export class ImapConnector implements IEmailConnector {
 		private credentials: GenericImapCredentials,
 		options?: ConnectorOptions
 	) {
-		this.options = options ?? { preserveOriginalFile: false };
+		this.options = options ?? { preserveOriginalFile: false, streamAttachmentsOnImport: true };
 		this.client = this.createClient();
 	}
 

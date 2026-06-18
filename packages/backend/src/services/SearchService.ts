@@ -208,6 +208,9 @@ export class SearchService {
 				'userEmail',
 			],
 			sortableAttributes: ['timestamp'],
+			faceting: {
+				maxValuesPerFacet: 10000,
+			},
 		});
 	}
 }

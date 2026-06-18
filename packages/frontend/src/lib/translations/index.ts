@@ -13,6 +13,7 @@ import ja from './ja.json';
 import et from './et.json';
 import el from './el.json';
 import bg from './bg.json';
+import hu from './hu.json';
 // This is your config object.
 // It defines the languages and how to load them.
 const config: Config = {
@@ -83,6 +84,12 @@ const config: Config = {
 			locale: 'bg',
 			key: 'app',
 			loader: async () => bg.app,
+		},
+		// Hungarian 🇭🇺
+		{
+			locale: 'hu',
+			key: 'app',
+			loader: async () => hu.app,
 		},
 	],
 	fallbackLocale: 'en',

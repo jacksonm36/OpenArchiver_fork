@@ -10,6 +10,7 @@ import type {
 	SyncState,
 	MailboxUser,
 } from '@open-archiver/types';
+import type { FileImportProgressContext } from '../helpers/fileImportProgress';
 import { GoogleWorkspaceConnector } from './ingestion-connectors/GoogleWorkspaceConnector';
 import { MicrosoftConnector } from './ingestion-connectors/MicrosoftConnector';
 import { ImapConnector } from './ingestion-connectors/ImapConnector';
@@ -27,6 +28,8 @@ export interface ConnectorOptions {
 	/** When true, connectors omit attachment binary content from the
 	 *  yielded EmailObject to avoid unnecessary memory allocation. */
 	preserveOriginalFile: boolean;
+	/** When true, PST attachments are read in chunks and written to temp files. */
+	streamAttachmentsOnImport: boolean;
 }
 
 // Define a common interface for all connectors
@@ -35,7 +38,8 @@ export interface IEmailConnector {
 	fetchEmails(
 		userEmail: string,
 		syncState?: SyncState | null,
-		checkDuplicate?: (messageId: string) => Promise<boolean>
+		checkDuplicate?: (messageId: string) => Promise<boolean>,
+		fileImportProgress?: FileImportProgressContext
 	): AsyncGenerator<EmailObject | null>;
 	getUpdatedSyncState(userEmail?: string): SyncState;
 	listAllUsers(): AsyncGenerator<MailboxUser>;
@@ -48,6 +52,7 @@ export class EmailProviderFactory {
 		const credentials = source.credentials;
 		const options: ConnectorOptions = {
 			preserveOriginalFile: source.preserveOriginalFile ?? false,
+			streamAttachmentsOnImport: source.streamAttachmentsOnImport ?? true,
 		};
 
 		switch (source.provider) {

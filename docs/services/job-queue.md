@@ -64,7 +64,7 @@ Resource usage is controlled by `RESOURCE_PROFILE` (`auto`, `low`, `balanced`, `
 
 | Environment Variable           | Profile default (low / balanced / high) | Description                                           |
 | ------------------------------ | --------------------------------------- | ----------------------------------------------------- |
-| `RESOURCE_PROFILE`             | `auto`                                  | Base tuning preset; `auto` detects system RAM         |
+| `RESOURCE_PROFILE`             | `auto`                                  | Auto-detect RAM/CPU (Docker, LXC, QEMU/KVM, Hyper-V, bare metal) |
 | `SYNC_FREQUENCY`               | `*/15` / `*/5` / `* * * * *` cron       | Continuous sync scheduling                          |
 | `INGESTION_WORKER_CONCURRENCY` | `1` / `2` / `5`                         | Parallel `process-mailbox` jobs                       |
 | `INDEXING_WORKER_CONCURRENCY`  | `1` / `2` / `3`                         | Parallel `index-email-batch` jobs                     |

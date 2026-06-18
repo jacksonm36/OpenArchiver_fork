@@ -698,7 +698,7 @@ const options = {
 					properties: {
 						language: {
 							type: 'string',
-							enum: ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'ja', 'et', 'el'],
+							enum: ['en', 'es', 'fr', 'de', 'it', 'pt', 'nl', 'ja', 'et', 'el', 'bg', 'hu'],
 							example: 'en',
 							description: 'Default UI language code.',
 						},

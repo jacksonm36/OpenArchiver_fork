@@ -1,21 +1,25 @@
 <script lang="ts">
-	import type { IngestionDiagnostics, SafeIngestionSource } from '@open-archiver/types';
+	import type { IngestionDiagnostics, SafeIngestionSource, ResumeImportMode } from '@open-archiver/types';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Button } from '$lib/components/ui/button';
 	import { Progress } from '$lib/components/ui/progress';
 	import { api } from '$lib/api.client';
-	import { Loader2 } from 'lucide-svelte';
+	import { Loader2, Play } from 'lucide-svelte';
 	import { t } from '$lib/translations';
+	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
 
 	let {
 		source,
 		open = $bindable(false),
+		onResume,
 	}: {
 		source: SafeIngestionSource | null;
 		open?: boolean;
+		onResume?: () => void;
 	} = $props();
 
 	let loading = $state(false);
+	let resuming = $state(false);
 	let diagnostics = $state<IngestionDiagnostics | null>(null);
 	let error = $state<string | null>(null);
 
@@ -35,6 +39,40 @@
 			diagnostics = null;
 		} finally {
 			loading = false;
+		}
+	}
+
+	async function resumeImport(mode: ResumeImportMode) {
+		if (!source) return;
+		resuming = true;
+		try {
+			const res = await api(`/ingestion-sources/${source.id}/resume-import`, {
+				method: 'POST',
+				body: JSON.stringify({ mode }),
+			});
+			const body = await res.json();
+			if (!res.ok) {
+				throw new Error(body.message || 'Failed to resume');
+			}
+			setAlert({
+				type: 'success',
+				title: $t('app.ingestions.resume_import_success'),
+				message: '',
+				duration: 3000,
+				show: true,
+			});
+			onResume?.();
+			open = false;
+		} catch (e) {
+			setAlert({
+				type: 'error',
+				title: $t('app.ingestions.resume_import_failed'),
+				message: e instanceof Error ? e.message : String(e),
+				duration: 5000,
+				show: true,
+			});
+		} finally {
+			resuming = false;
 		}
 	}
 
@@ -92,6 +130,41 @@
 						</p>
 					{/if}
 				</div>
+
+				{#if diagnostics.resume?.available}
+					<div class="rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+						<p class="mb-2 font-medium">{$t('app.ingestions.resume_import')}</p>
+						{#if diagnostics.resume.lastGlobalIndex !== null}
+							<p class="text-muted-foreground mb-3 text-xs">
+								{$t('app.ingestions.resume_checkpoint', {
+									index: diagnostics.resume.lastGlobalIndex + 1,
+								})}
+								{#if diagnostics.resume.lastMessageId}
+									<br />
+									<span class="font-mono">{diagnostics.resume.lastMessageId}</span>
+								{/if}
+							</p>
+						{/if}
+						<div class="flex flex-wrap gap-2">
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={resuming}
+								onclick={() => resumeImport('dedup')}
+							>
+								<Play class="mr-2 h-3.5 w-3.5" />
+								{$t('app.ingestions.resume_dedup')}
+							</Button>
+							<Button size="sm" disabled={resuming} onclick={() => resumeImport('import')}>
+								<Play class="mr-2 h-3.5 w-3.5" />
+								{$t('app.ingestions.resume_import')}
+							</Button>
+						</div>
+						<p class="text-muted-foreground mt-2 text-xs">
+							{$t('app.ingestions.resume_dedup_description')}
+						</p>
+					</div>
+				{/if}
 
 				<div class="grid grid-cols-2 gap-3">
 					<div class="rounded-md border p-3">

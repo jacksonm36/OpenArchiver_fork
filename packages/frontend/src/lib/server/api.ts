@@ -14,7 +14,7 @@ export const api = async (
 	event: RequestEvent,
 	options: RequestInit = {}
 ): Promise<Response> => {
-	const accessToken = event.cookies.get('accessToken');
+	const accessToken = event.cookies.get(AUTH_COOKIE_NAME);
 
 	const defaultHeaders: HeadersInit = {
 		'Content-Type': 'application/json',

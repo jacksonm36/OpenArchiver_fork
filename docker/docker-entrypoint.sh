@@ -4,6 +4,16 @@
 set -e
 
 # Cap Node.js heap when NODE_MAX_OLD_SPACE_MB is set (recommended for low-RAM hosts).
+# When unset and RESOURCE_PROFILE=auto, detect from cgroup/host RAM limits.
+if [ -z "$NODE_MAX_OLD_SPACE_MB" ]; then
+	if [ "${RESOURCE_PROFILE:-auto}" = "auto" ] && [ -f /app/scripts/detect-resources.mjs ]; then
+		DETECTED_HEAP=$(node /app/scripts/detect-resources.mjs heap-mb 2>/dev/null || true)
+		if [ -n "$DETECTED_HEAP" ]; then
+			export NODE_MAX_OLD_SPACE_MB="$DETECTED_HEAP"
+		fi
+	fi
+fi
+
 if [ -n "$NODE_MAX_OLD_SPACE_MB" ]; then
 	case "$NODE_OPTIONS" in
 		*max-old-space-size*) ;;

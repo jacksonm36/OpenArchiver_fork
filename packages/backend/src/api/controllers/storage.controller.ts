@@ -15,21 +15,29 @@ export class StorageController {
 		}
 
 		// Normalize the path to prevent directory traversal
-		const normalizedPath = path.normalize(unsafePath).replace(/^(\.\.(\/|\\|$))+/, '');
+		const normalizedPath = path
+			.normalize(unsafePath)
+			.replace(/^(\.\.(\/|\\|$))+/, '')
+			.replace(/\\/g, '/');
 
-		// Determine the base path from storage configuration
-		const basePath = storageConfig.type === 'local' ? storageConfig.rootPath : '/';
-
-		// Resolve the full path and ensure it's within the storage directory
-		const fullPath = path.join(basePath, normalizedPath);
-
-		if (!fullPath.startsWith(basePath)) {
+		if (normalizedPath.includes('\0') || path.isAbsolute(normalizedPath)) {
 			res.status(400).send(req.t('storage.invalidFilePath'));
 			return;
 		}
 
-		// Use the sanitized, relative path for storage service operations
-		const safePath = path.relative(basePath, fullPath);
+		// Resolve under the configured storage root (prefix-safe, not startsWith-only).
+		const basePath = path.resolve(
+			storageConfig.type === 'local' ? storageConfig.rootPath : '/'
+		);
+		const resolvedPath = path.resolve(basePath, normalizedPath);
+		const relativePath = path.relative(basePath, resolvedPath);
+
+		if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+			res.status(400).send(req.t('storage.invalidFilePath'));
+			return;
+		}
+
+		const safePath = relativePath.split(path.sep).join('/');
 
 		try {
 			const fileExists = await this.storageService.exists(safePath);
@@ -40,7 +48,11 @@ export class StorageController {
 
 			const fileStream = await this.storageService.get(safePath);
 			const fileName = path.basename(safePath);
-			res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+			const asciiName = fileName.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+			res.setHeader(
+				'Content-Disposition',
+				`attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(fileName)}`
+			);
 			fileStream.pipe(res);
 		} catch (error) {
 			console.error('Error downloading file:', error);

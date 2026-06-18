@@ -55,12 +55,24 @@ Set `RESOURCE_PROFILE` in `.env`:
 
 | Profile | When to use | Ingestion workers | Indexing workers | Batch size | Sync interval |
 |---------|-------------|-------------------|------------------|------------|---------------|
-| `auto` | **Default** — detects RAM | varies | varies | varies | varies |
+| `auto` | **Default** — detects RAM/CPU (incl. Docker cgroup limits) and tunes all settings | varies | varies | varies | varies |
 | `low` | ≤ 6–8 GB RAM, 4 cores | 1 | 1 | 25 | every 15 min |
 | `balanced` | 8–16 GB RAM | 2 | 2 | 50 | every 5 min |
 | `high` | 16 GB+ RAM | 5 | 3 | 100 | every 1 min |
 
-`auto` picks `low` when total system RAM is under 8 GB.
+`auto` reads **effective** RAM and CPU from the narrowest applicable limit:
+
+| Environment | How limits are detected |
+|-------------|-------------------------|
+| **LXC / LXD** | cgroup v1/v2 hierarchy (`/proc/self/cgroup`, walks `memory.max`, `cpu.max`, `cpuset.cpus`) |
+| **Docker / Podman** | cgroup limits (container memory/CPU caps) |
+| **QEMU / KVM** | Guest `MemTotal` from `/proc/meminfo` (honours virtio balloon), DMI + CPU hypervisor flags |
+| **Hyper-V** | Guest memory from `/proc/meminfo`, DMI `Microsoft Corporation` / `Virtual Machine` |
+| **Bare metal** | `os.totalmem()` and online CPU count |
+
+View detected platform and limits on **Admin → Job Queues → Resource auto-tuning**.
+
+`low` / `balanced` / `high` use fixed presets; you can still override individual env vars.
 
 Individual settings can still override the profile:
 
@@ -99,7 +111,7 @@ PST parsing is the most memory-intensive operation. Recommendations:
 3. Mount PST via **Local Path** inside the container
 4. Disable Tika for initial import; re-enable later if needed
 
-## Bare Metal / Non-Docker
+## Bare Metal / Non-Docker (native install)
 
 Add to `.env`:
 
@@ -107,9 +119,19 @@ Add to `.env`:
 RESOURCE_PROFILE=low
 NODE_MAX_OLD_SPACE_MB=1024
 SYNC_FREQUENCY=*/15 * * * *
-MEILI_INDEXING_BATCH=25
+MEILI_INDEXING_BATCH=20
 # TIKA_URL=   # leave unset to save RAM
 ```
+
+For **50–100 GB PST/EML** on native install:
+
+1. Use **Local Path** ingestion — never upload multi-GB files through the browser.
+2. Set `FILE_IMPORT_LOCAL_PATH_ONLY=true` (or `FILE_IMPORT_MAX_UPLOAD_MB=0`) to block browser uploads entirely.
+3. Set `IMPORT_ALLOWED_PATHS` to the directory where PST/ZIP files live (must be readable by the Open Archiver process).
+4. Import **one file at a time**; use **Resume import** after errors.
+5. Cap Meilisearch on the same host: `MEILI_MAX_INDEXING_MEMORY=384MiB`, `MEILI_MAX_INDEXING_THREADS=2`.
+
+The backend preloads duplicate Message-IDs into memory per import job (no per-message DB lookups during resume), skips full EML parsing for known duplicates, and throttles checkpoint writes to reduce Postgres load.
 
 Ensure external PostgreSQL, Valkey, and Meilisearch are similarly capped. For Meilisearch, set:
 

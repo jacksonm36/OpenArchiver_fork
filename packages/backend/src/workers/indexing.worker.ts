@@ -3,6 +3,8 @@ import { connection } from '../config/redis';
 import { config } from '../config';
 import indexEmailBatchProcessor from '../jobs/processors/index-email-batch.processor';
 import { logger } from '../config/logger';
+import { attachWorkerLogging } from './attachWorkerLogging';
+import { activityLogService } from '../services/ActivityLogService';
 
 const processor = async (job: any) => {
 	switch (job.name) {
@@ -33,5 +35,25 @@ logger.info(
 	'Indexing worker started'
 );
 
-process.on('SIGINT', () => worker.close());
-process.on('SIGTERM', () => worker.close());
+attachWorkerLogging(worker, 'indexing');
+
+void activityLogService.push({
+	level: 'success',
+	source: 'worker',
+	message: `indexing worker online (concurrency=${config.resources.indexingWorkerConcurrency})`,
+});
+
+const shutdown = async (signal: string) => {
+	logger.info(`${signal} received, shutting down indexing worker...`);
+	try {
+		await worker.close();
+		logger.info('Indexing worker closed');
+		process.exit(0);
+	} catch (err) {
+		logger.error({ err }, 'Failed to close indexing worker');
+		process.exit(1);
+	}
+};
+
+process.once('SIGINT', () => void shutdown('SIGINT'));
+process.once('SIGTERM', () => void shutdown('SIGTERM'));

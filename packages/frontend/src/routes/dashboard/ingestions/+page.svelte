@@ -3,7 +3,7 @@
 	import * as Table from '$lib/components/ui/table';
 	import { Button } from '$lib/components/ui/button';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, Activity } from 'lucide-svelte';
+	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, Activity, Play, FileDown } from 'lucide-svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -11,9 +11,10 @@
 	import IngestionDiagnosticsDialog from '$lib/components/custom/IngestionDiagnosticsDialog.svelte';
 	import IngestionProgressCell from '$lib/components/custom/IngestionProgressCell.svelte';
 	import { api } from '$lib/api.client';
-	import type { SafeIngestionSource, CreateIngestionSourceDto, IngestionDiagnostics } from '@open-archiver/types';
+	import type { SafeIngestionSource, CreateIngestionSourceDto, IngestionDiagnostics, ResumeImportMode } from '@open-archiver/types';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
 	import { onDestroy, onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import { t } from '$lib/translations';
 
 	let { data }: { data: PageData } = $props();
@@ -33,9 +34,101 @@
 	let diagnosticsBySourceId = $state<Record<string, IngestionDiagnostics>>({});
 	let diagnosticsSource = $state<SafeIngestionSource | null>(null);
 	let isDiagnosticsOpen = $state(false);
+	let ignoreCreateDialogOutside = $state(false);
+	let createFormKey = $state(0);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let isPageVisible = $state(true);
 	const POLL_INTERVAL_MS = 8000;
+	const FILE_BASED_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
+
+	function canResumeSource(source: SafeIngestionSource): boolean {
+		return (
+			FILE_BASED_PROVIDERS.includes(source.provider as (typeof FILE_BASED_PROVIDERS)[number]) &&
+			source.status === 'error'
+		);
+	}
+
+	function exportGroupSourceId(source: SafeIngestionSource): string {
+		return source.mergedIntoId ?? source.id;
+	}
+
+	async function downloadArchiveExport(
+		source: SafeIngestionSource,
+		format: 'mbox' | 'zip'
+	): Promise<void> {
+		if (!browser) return;
+		const ingestionSourceId = exportGroupSourceId(source);
+		const path =
+			format === 'mbox'
+				? `/archived-emails/export/mbox?ingestionSourceId=${encodeURIComponent(ingestionSourceId)}`
+				: `/archived-emails/export/zip?ingestionSourceId=${encodeURIComponent(ingestionSourceId)}`;
+
+		try {
+			const response = await api(path);
+			if (!response.ok) {
+				throw new Error(`HTTP ${response.status}`);
+			}
+			const blob = await response.blob();
+			const disposition = response.headers.get('Content-Disposition') ?? '';
+			const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="([^"]+)"/i);
+			const fileName = decodeURIComponent(
+				match?.[1] || match?.[2] || `${source.name}.${format === 'mbox' ? 'mbox' : 'zip'}`
+			);
+			const url = window.URL.createObjectURL(blob);
+			const a = document.createElement('a');
+			a.href = url;
+			a.download = fileName;
+			document.body.appendChild(a);
+			a.click();
+			window.URL.revokeObjectURL(url);
+			a.remove();
+			setAlert({
+				type: 'success',
+				title: $t('app.ingestions.export_started'),
+				message: fileName,
+				duration: 4000,
+				show: true,
+			});
+		} catch (error) {
+			console.error('Export failed:', error);
+			setAlert({
+				type: 'error',
+				title: $t('app.ingestions.export_failed'),
+				message: String(error),
+				duration: 5000,
+				show: true,
+			});
+		}
+	}
+
+	async function handleResumeImport(id: string, mode: ResumeImportMode = 'import') {
+		const res = await api(`/ingestion-sources/${id}/resume-import`, {
+			method: 'POST',
+			body: JSON.stringify({ mode }),
+		});
+		if (!res.ok) {
+			const errorBody = await res.json();
+			setAlert({
+				type: 'error',
+				title: $t('app.ingestions.resume_import_failed'),
+				message: errorBody.message || JSON.stringify(errorBody),
+				duration: 5000,
+				show: true,
+			});
+			return;
+		}
+		setAlert({
+			type: 'success',
+			title: $t('app.ingestions.resume_import_success'),
+			message: '',
+			duration: 3000,
+			show: true,
+		});
+		ingestionSources = ingestionSources.map((s) =>
+			s.id === id ? { ...s, status: 'importing' as const } : s
+		);
+		await refreshSourcesAndDiagnostics();
+	}
 
 	const activeSourceIds = $derived(
 		ingestionSources
@@ -162,12 +255,21 @@
 
 	const openCreateDialog = () => {
 		selectedSource = null;
+		createFormKey += 1;
+		ignoreCreateDialogOutside = true;
 		isDialogOpen = true;
+		requestAnimationFrame(() => {
+			ignoreCreateDialogOutside = false;
+		});
 	};
 
 	const openEditDialog = (source: SafeIngestionSource) => {
 		selectedSource = source as SafeIngestionSource;
+		ignoreCreateDialogOutside = true;
 		isDialogOpen = true;
+		requestAnimationFrame(() => {
+			ignoreCreateDialogOutside = false;
+		});
 	};
 
 	const openDeleteDialog = (source: SafeIngestionSource) => {
@@ -421,7 +523,9 @@
 			}
 			setAlert({
 				type: 'error',
-				title: 'Authentication Failed',
+				title: selectedSource
+					? $t('app.ingestions.edit')
+					: $t('app.ingestions.create'),
 				message,
 				duration: 5000,
 				show: true,
@@ -628,9 +732,35 @@
 										<DropdownMenu.Item onclick={() => openDiagnostics(source)}
 											>{$t('app.ingestions.view_diagnostics')}</DropdownMenu.Item
 										>
+										{#if canResumeSource(source)}
+											<DropdownMenu.Item onclick={() => handleResumeImport(source.id, 'dedup')}>
+												<Play class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.resume_dedup')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Item onclick={() => handleResumeImport(source.id, 'import')}>
+												<Play class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.resume_import')}
+											</DropdownMenu.Item>
+										{/if}
 										<DropdownMenu.Item onclick={() => handleSync(source.id)}
 											>{$t('app.ingestions.force_sync')}</DropdownMenu.Item
 										>
+										<DropdownMenu.Separator />
+										<DropdownMenu.Label
+											>{$t('app.ingestions.export_eml_zip_hint')}</DropdownMenu.Label
+										>
+										<DropdownMenu.Item
+											onclick={() => downloadArchiveExport(source, 'mbox')}
+										>
+											<FileDown class="mr-2 h-4 w-4" />
+											{$t('app.ingestions.export_mbox')}
+										</DropdownMenu.Item>
+										<DropdownMenu.Item
+											onclick={() => downloadArchiveExport(source, 'zip')}
+										>
+											<FileDown class="mr-2 h-4 w-4" />
+											{$t('app.ingestions.export_eml_zip')}
+										</DropdownMenu.Item>
 										<DropdownMenu.Separator />
 										<DropdownMenu.Item
 											class="text-red-600"
@@ -724,6 +854,20 @@
 													onclick={() => openDiagnostics(child)}
 													>{$t('app.ingestions.view_diagnostics')}</DropdownMenu.Item
 												>
+												{#if canResumeSource(child)}
+													<DropdownMenu.Item
+														onclick={() => handleResumeImport(child.id, 'dedup')}
+													>
+														<Play class="mr-2 h-4 w-4" />
+														{$t('app.ingestions.resume_dedup')}
+													</DropdownMenu.Item>
+													<DropdownMenu.Item
+														onclick={() => handleResumeImport(child.id, 'import')}
+													>
+														<Play class="mr-2 h-4 w-4" />
+														{$t('app.ingestions.resume_import')}
+													</DropdownMenu.Item>
+												{/if}
 												<DropdownMenu.Item
 													onclick={() => handleSync(child.id)}
 													>{$t(
@@ -764,8 +908,15 @@
 <Dialog.Root bind:open={isDialogOpen}>
 	<Dialog.Content
 		class="sm:max-w-120 md:max-w-180"
+		onPointerDownOutside={(e) => {
+			if (ignoreCreateDialogOutside) {
+				e.preventDefault();
+			}
+		}}
 		onInteractOutside={(e) => {
-			e.preventDefault();
+			if (ignoreCreateDialogOutside) {
+				e.preventDefault();
+			}
 		}}
 	>
 		<Dialog.Header>
@@ -788,11 +939,15 @@
 				>
 			</Dialog.Description>
 		</Dialog.Header>
-		<IngestionSourceForm
-			source={selectedSource}
-			existingSources={ingestionSources}
-			onSubmit={handleFormSubmit}
-		/>
+		{#if isDialogOpen}
+			{#key selectedSource?.id ?? `create-${createFormKey}`}
+				<IngestionSourceForm
+					source={selectedSource}
+					existingSources={ingestionSources}
+					onSubmit={handleFormSubmit}
+				/>
+			{/key}
+		{/if}
 	</Dialog.Content>
 </Dialog.Root>
 <Dialog.Root bind:open={isDeleteDialogOpen}>
@@ -886,4 +1041,8 @@
 	</Dialog.Content>
 </Dialog.Root>
 
-<IngestionDiagnosticsDialog source={diagnosticsSource} bind:open={isDiagnosticsOpen} />
+<IngestionDiagnosticsDialog
+	source={diagnosticsSource}
+	bind:open={isDiagnosticsOpen}
+	onResume={refreshSourcesAndDiagnostics}
+/>

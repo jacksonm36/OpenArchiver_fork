@@ -6,9 +6,13 @@
 
 	let {
 		raw,
+		rawTooLarge = false,
 		rawHtml,
-	}: { raw?: Buffer | { type: 'Buffer'; data: number[] } | undefined; rawHtml?: string } =
-		$props();
+	}: {
+		raw?: string | Buffer | { type: 'Buffer'; data: number[] } | undefined;
+		rawTooLarge?: boolean;
+		rawHtml?: string;
+	} = $props();
 
 	let parsedEmail: Email | null = $state(null);
 	let isLoading = $state(true);
@@ -79,7 +83,11 @@
 			if (raw) {
 				try {
 					let buffer: Uint8Array;
-					if ('type' in raw && raw.type === 'Buffer') {
+					if (typeof raw === 'string') {
+						const binary = atob(raw);
+						buffer = new Uint8Array(binary.length);
+						for (let i = 0; i < binary.length; i++) buffer[i] = binary.charCodeAt(i);
+					} else if ('type' in raw && raw.type === 'Buffer') {
 						buffer = new Uint8Array(raw.data);
 					} else {
 						buffer = new Uint8Array(raw as Buffer);
@@ -100,7 +108,9 @@
 </script>
 
 <div class="mt-2 rounded-md border bg-white p-4">
-	{#if isLoading}
+	{#if rawTooLarge}
+		<p class="text-muted-foreground text-sm">{$t('app.components.email_preview.too_large')}</p>
+	{:else if isLoading}
 		<p>{$t('app.components.email_preview.loading')}</p>
 	{:else if emailHtml()}
 		<iframe

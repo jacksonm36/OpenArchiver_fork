@@ -10,7 +10,7 @@
 	let { data, children } = $props();
 
 	$effect(() => {
-		authStore.syncWithServer(data.user, data.accessToken);
+		authStore.syncWithServer(data.user);
 	});
 
 	$effect(() => {

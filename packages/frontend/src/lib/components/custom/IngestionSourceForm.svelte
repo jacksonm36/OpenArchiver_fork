@@ -3,6 +3,7 @@
 	import { Button } from '$lib/components/ui/button';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Switch } from '$lib/components/ui/switch';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import * as Select from '$lib/components/ui/select';
@@ -11,6 +12,10 @@
 	import { Textarea } from '$lib/components/ui/textarea/index.js';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
 	import { uploadFileWithProgress, formatUploadBytes } from '$lib/upload.client';
+	import LocalImportFilePicker from '$lib/components/custom/LocalImportFilePicker.svelte';
+	import { api } from '$lib/api.client';
+	import { onMount } from 'svelte';
+	import type { IImportSettings } from '@open-archiver/types';
 	import { Progress } from '$lib/components/ui/progress';
 	import { Loader2, Info, ChevronDown } from 'lucide-svelte';
 	import tippy from 'tippy.js';
@@ -66,6 +71,7 @@
 			allowInsecureCert: false,
 		},
 		preserveOriginalFile: source?.preserveOriginalFile ?? false,
+		streamAttachmentsOnImport: source?.streamAttachmentsOnImport ?? true,
 	});
 
 	$effect(() => {
@@ -82,10 +88,34 @@
 	let uploadProgress = $state<{ percent: number; loaded: number; total: number } | null>(null);
 	let showAdvanced = $state(false);
 	let mergeEnabled = $state(false);
+	let importMethod = $state<'upload' | 'local'>('local');
+
+	const FILE_IMPORT_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
+
+	let importSettings = $state<IImportSettings | null>(null);
+	let previousFileImportProvider = $state<string | null>(null);
+
+	onMount(async () => {
+		const res = await api('/ingestion-sources/import-settings');
+		if (res.ok) {
+			importSettings = await res.json();
+			if (importSettings?.localPathOnly) {
+				importMethod = 'local';
+			}
+		}
+	});
 
 	$effect(() => {
-		if (!source && formData.provider === 'pst_import') {
-			importMethod = 'local';
+		const provider = formData.provider;
+		if (
+			!source &&
+			FILE_IMPORT_PROVIDERS.includes(provider as (typeof FILE_IMPORT_PROVIDERS)[number]) &&
+			provider !== previousFileImportProvider
+		) {
+			previousFileImportProvider = provider;
+			if (importSettings?.localPathOnly) {
+				importMethod = 'local';
+			}
 		}
 	});
 
@@ -95,8 +125,6 @@
 			delete formData.mergedIntoId;
 		}
 	});
-
-	let importMethod = $state<'upload' | 'local'>('upload');
 
 	$effect(() => {
 		if (importMethod === 'upload') {
@@ -115,6 +143,45 @@
 
 	const handleSubmit = async (event: Event) => {
 		event.preventDefault();
+
+		const isFileImport = FILE_IMPORT_PROVIDERS.includes(
+			formData.provider as (typeof FILE_IMPORT_PROVIDERS)[number]
+		);
+		const useLocalPath =
+			isFileImport && (importMethod === 'local' || importSettings?.localPathOnly);
+
+		if (useLocalPath) {
+			const localPath =
+				'localFilePath' in formData.providerConfig
+					? formData.providerConfig.localFilePath?.trim()
+					: '';
+			if (!localPath) {
+				setAlert({
+					type: 'error',
+					title: $t('app.components.ingestion_source_form.local_path_required_title'),
+					message: $t('app.components.ingestion_source_form.local_path_required'),
+					duration: 8000,
+					show: true,
+				});
+				return;
+			}
+		} else if (isFileImport && importMethod === 'upload') {
+			const uploadedPath =
+				'uploadedFilePath' in formData.providerConfig
+					? formData.providerConfig.uploadedFilePath?.trim()
+					: '';
+			if (!uploadedPath) {
+				setAlert({
+					type: 'error',
+					title: $t('app.components.ingestion_source_form.upload_failed'),
+					message: $t('app.components.ingestion_source_form.upload_file_required'),
+					duration: 8000,
+					show: true,
+				});
+				return;
+			}
+		}
+
 		isSubmitting = true;
 		try {
 			await onSubmit(formData);
@@ -128,6 +195,24 @@
 		const file = target.files?.[0];
 		if (!file) {
 			return;
+		}
+
+		if (importSettings && importSettings.maxUploadMb > 0) {
+			const maxBytes = importSettings.maxUploadMb * 1024 * 1024;
+			if (file.size > maxBytes) {
+				setAlert({
+					type: 'error',
+					title: $t('app.components.ingestion_source_form.upload_failed'),
+					message: $t('app.components.ingestion_source_form.upload_too_large', {
+						limit: importSettings.maxUploadMb,
+						size: formatUploadBytes(file.size),
+					}),
+					duration: 10000,
+					show: true,
+				});
+				target.value = '';
+				return;
+			}
 		}
 
 		fileUploading = true;
@@ -281,27 +366,36 @@
 			/>
 		</div>
 	{:else if formData.provider === 'pst_import'}
-		<div class="grid grid-cols-4 items-start gap-4">
-			<Label class="pt-2 text-left"
-				>{$t('app.components.ingestion_source_form.import_method')}</Label
-			>
-			<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="upload" id="pst-upload" />
-					<Label for="pst-upload"
-						>{$t('app.components.ingestion_source_form.upload_file')}</Label
-					>
-				</div>
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="local" id="pst-local" />
-					<Label for="pst-local"
-						>{$t('app.components.ingestion_source_form.local_path')}</Label
-					>
-				</div>
-			</RadioGroup.Root>
-		</div>
+		{#if importSettings?.localPathOnly}
+			<Alert.Root>
+				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
+				<Alert.Description>
+					{$t('app.components.ingestion_source_form.local_path_only_description')}
+				</Alert.Description>
+			</Alert.Root>
+		{:else}
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label class="pt-2 text-left"
+					>{$t('app.components.ingestion_source_form.import_method')}</Label
+				>
+				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="upload" id="pst-upload" />
+						<Label for="pst-upload"
+							>{$t('app.components.ingestion_source_form.upload_file')}</Label
+						>
+					</div>
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="local" id="pst-local" />
+						<Label for="pst-local"
+							>{$t('app.components.ingestion_source_form.local_path')}</Label
+						>
+					</div>
+				</RadioGroup.Root>
+			</div>
+		{/if}
 
-		{#if importMethod === 'upload'}
+		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
 			<div class="grid grid-cols-4 items-center gap-4">
 				<Label for="pst-file" class="text-left"
 					>{$t('app.components.ingestion_source_form.pst_file')}</Label
@@ -337,40 +431,56 @@
 				</div>
 			</div>
 		{:else}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="pst-local-path" class="text-left"
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label for="pst-local-path" class="pt-2 text-left"
 					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
 				>
-				<Input
-					id="pst-local-path"
-					bind:value={formData.providerConfig.localFilePath}
-					placeholder="/path/to/file.pst"
-					class="col-span-3"
-				/>
+				<div class="col-span-3 space-y-3">
+					<Input
+						id="pst-local-path"
+						bind:value={formData.providerConfig.localFilePath}
+						placeholder="/var/data/open-archiver/imports/archive.pst"
+						required
+					/>
+					<LocalImportFilePicker
+						provider="pst_import"
+						settings={importSettings}
+						bind:value={formData.providerConfig.localFilePath}
+					/>
+				</div>
 			</div>
 		{/if}
 	{:else if formData.provider === 'eml_import'}
-		<div class="grid grid-cols-4 items-start gap-4">
-			<Label class="pt-2 text-left"
-				>{$t('app.components.ingestion_source_form.import_method')}</Label
-			>
-			<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="upload" id="eml-upload" />
-					<Label for="eml-upload"
-						>{$t('app.components.ingestion_source_form.upload_file')}</Label
-					>
-				</div>
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="local" id="eml-local" />
-					<Label for="eml-local"
-						>{$t('app.components.ingestion_source_form.local_path')}</Label
-					>
-				</div>
-			</RadioGroup.Root>
-		</div>
+		{#if importSettings?.localPathOnly}
+			<Alert.Root>
+				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
+				<Alert.Description>
+					{$t('app.components.ingestion_source_form.local_path_only_description')}
+				</Alert.Description>
+			</Alert.Root>
+		{:else}
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label class="pt-2 text-left"
+					>{$t('app.components.ingestion_source_form.import_method')}</Label
+				>
+				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="upload" id="eml-upload" />
+						<Label for="eml-upload"
+							>{$t('app.components.ingestion_source_form.upload_file')}</Label
+						>
+					</div>
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="local" id="eml-local" />
+						<Label for="eml-local"
+							>{$t('app.components.ingestion_source_form.local_path')}</Label
+						>
+					</div>
+				</RadioGroup.Root>
+			</div>
+		{/if}
 
-		{#if importMethod === 'upload'}
+		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
 			<div class="grid grid-cols-4 items-center gap-4">
 				<Label for="eml-file" class="text-left"
 					>{$t('app.components.ingestion_source_form.eml_file')}</Label
@@ -389,40 +499,56 @@
 				</div>
 			</div>
 		{:else}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="eml-local-path" class="text-left"
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label for="eml-local-path" class="pt-2 text-left"
 					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
 				>
-				<Input
-					id="eml-local-path"
-					bind:value={formData.providerConfig.localFilePath}
-					placeholder="/path/to/file.zip"
-					class="col-span-3"
-				/>
+				<div class="col-span-3 space-y-3">
+					<Input
+						id="eml-local-path"
+						bind:value={formData.providerConfig.localFilePath}
+						placeholder="/var/data/open-archiver/imports/archive.zip"
+						required
+					/>
+					<LocalImportFilePicker
+						provider="eml_import"
+						settings={importSettings}
+						bind:value={formData.providerConfig.localFilePath}
+					/>
+				</div>
 			</div>
 		{/if}
 	{:else if formData.provider === 'mbox_import'}
-		<div class="grid grid-cols-4 items-start gap-4">
-			<Label class="pt-2 text-left"
-				>{$t('app.components.ingestion_source_form.import_method')}</Label
-			>
-			<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="upload" id="mbox-upload" />
-					<Label for="mbox-upload"
-						>{$t('app.components.ingestion_source_form.upload_file')}</Label
-					>
-				</div>
-				<div class="flex items-center space-x-2">
-					<RadioGroup.Item value="local" id="mbox-local" />
-					<Label for="mbox-local"
-						>{$t('app.components.ingestion_source_form.local_path')}</Label
-					>
-				</div>
-			</RadioGroup.Root>
-		</div>
+		{#if importSettings?.localPathOnly}
+			<Alert.Root>
+				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
+				<Alert.Description>
+					{$t('app.components.ingestion_source_form.local_path_only_description')}
+				</Alert.Description>
+			</Alert.Root>
+		{:else}
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label class="pt-2 text-left"
+					>{$t('app.components.ingestion_source_form.import_method')}</Label
+				>
+				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="upload" id="mbox-upload" />
+						<Label for="mbox-upload"
+							>{$t('app.components.ingestion_source_form.upload_file')}</Label
+						>
+					</div>
+					<div class="flex items-center space-x-2">
+						<RadioGroup.Item value="local" id="mbox-local" />
+						<Label for="mbox-local"
+							>{$t('app.components.ingestion_source_form.local_path')}</Label
+						>
+					</div>
+				</RadioGroup.Root>
+			</div>
+		{/if}
 
-		{#if importMethod === 'upload'}
+		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
 			<div class="grid grid-cols-4 items-center gap-4">
 				<Label for="mbox-file" class="text-left"
 					>{$t('app.components.ingestion_source_form.mbox_file')}</Label
@@ -441,16 +567,23 @@
 				</div>
 			</div>
 		{:else}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="mbox-local-path" class="text-left"
+			<div class="grid grid-cols-4 items-start gap-4">
+				<Label for="mbox-local-path" class="pt-2 text-left"
 					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
 				>
-				<Input
-					id="mbox-local-path"
-					bind:value={formData.providerConfig.localFilePath}
-					placeholder="/path/to/file.mbox"
-					class="col-span-3"
-				/>
+				<div class="col-span-3 space-y-3">
+					<Input
+						id="mbox-local-path"
+						bind:value={formData.providerConfig.localFilePath}
+						placeholder="/var/data/open-archiver/imports/archive.mbox"
+						required
+					/>
+					<LocalImportFilePicker
+						provider="mbox_import"
+						settings={importSettings}
+						bind:value={formData.providerConfig.localFilePath}
+					/>
+				</div>
 			</div>
 		{/if}
 	{/if}
@@ -478,6 +611,35 @@
 
 		{#if showAdvanced}
 			<div class="mt-3 grid gap-4">
+				{#if FILE_IMPORT_PROVIDERS.includes(formData.provider as (typeof FILE_IMPORT_PROVIDERS)[number])}
+					<div class="grid grid-cols-4 items-center gap-4">
+						<div class="flex items-center gap-1 text-left">
+							<Label for="streamAttachmentsOnImport"
+								>{$t(
+									'app.components.ingestion_source_form.stream_attachments_on_import'
+								)}</Label
+							>
+							<span
+								use:tippy={{
+									allowHTML: true,
+									content: $t(
+										'app.components.ingestion_source_form.stream_attachments_on_import_tooltip'
+									),
+									interactive: true,
+									delay: 500,
+								}}
+								class="text-muted-foreground cursor-help"
+							>
+								<Info class="h-4 w-4" />
+							</span>
+						</div>
+						<Switch
+							id="streamAttachmentsOnImport"
+							bind:checked={formData.streamAttachmentsOnImport}
+						/>
+					</div>
+				{/if}
+
 				<div class="grid grid-cols-4 items-center gap-4">
 					<div class="flex items-center gap-1 text-left">
 						<Label for="preserveOriginalFile"

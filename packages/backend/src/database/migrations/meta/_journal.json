@@ -253,6 +253,20 @@
 			"when": 1775000000000,
 			"tag": "0035_msgid_header_source_idx",
 			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "7",
+			"when": 1775100000000,
+			"tag": "0036_message_id_header_source_unique_idx",
+			"breakpoints": true
+		},
+		{
+			"idx": 37,
+			"version": "7",
+			"when": 1775200000000,
+			"tag": "0037_stream_attachments_on_import",
+			"breakpoints": true
 		}
 	]
 }

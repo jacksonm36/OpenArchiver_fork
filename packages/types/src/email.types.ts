@@ -14,6 +14,10 @@ export interface EmailAttachment {
 	contentType: string;
 	size: number;
 	content: Buffer;
+	/** Legacy: attachment staged on disk before archive. */
+	tempFilePath?: string;
+	/** PST streaming: one-shot reader (PST → archive direct, no /tmp copy). */
+	readContent?: () => NodeJS.ReadableStream;
 }
 
 /**
@@ -69,6 +73,8 @@ export interface EmailObject {
 	path?: string;
 	/** An array of tags or labels associated with the email. */
 	tags?: string[];
+	/** Monotonic index within a file-based import (PST/EML/Mbox) for resume checkpoints. */
+	fileImportIndex?: number;
 }
 
 /**

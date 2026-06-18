@@ -46,10 +46,14 @@
 		"failedToCreate": "Failed to create ingestion source due to a connection error.",
 		"notFound": "Ingestion source not found",
 		"initialImportTriggered": "Initial import triggered successfully.",
+		"resumeImportTriggered": "Import resume queued successfully.",
 		"forceSyncTriggered": "Force sync triggered successfully."
 	},
 	"archivedEmail": {
 		"notFound": "Archived email not found"
+	},
+	"export": {
+		"ingestionSourceRequired": "ingestionSourceId query parameter is required"
 	},
 	"search": {
 		"keywordsRequired": "Keywords are required"

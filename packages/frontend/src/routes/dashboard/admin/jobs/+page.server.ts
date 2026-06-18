@@ -2,8 +2,10 @@ import { api } from '$lib/server/api';
 import { error, type NumericRange } from '@sveltejs/kit';
 import type { PageServerLoad } from './$types';
 import type { IGetQueuesResponse } from '@open-archiver/types';
+import { requireSuperAdmin } from '$lib/server/requireSuperAdmin';
 
 export const load: PageServerLoad = async (event) => {
+	requireSuperAdmin(event);
 	try {
 		const response = await api('/jobs/queues', event);
 

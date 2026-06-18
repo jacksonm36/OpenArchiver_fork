@@ -73,6 +73,18 @@ export const createIngestionRouter = (
 
 	router.get('/', requirePermission('read', 'ingestion'), ingestionController.findAll);
 
+	router.get(
+		'/import-settings',
+		requirePermission('create', 'ingestion'),
+		ingestionController.getImportSettings
+	);
+
+	router.get(
+		'/import-files',
+		requirePermission('create', 'ingestion'),
+		ingestionController.listImportFiles
+	);
+
 	/**
 	 * @openapi
 	 * /v1/ingestion-sources/{id}:
@@ -215,6 +227,12 @@ export const createIngestionRouter = (
 		'/:id/import',
 		requirePermission('create', 'ingestion'),
 		ingestionController.triggerInitialImport
+	);
+
+	router.post(
+		'/:id/resume-import',
+		requirePermission('create', 'ingestion'),
+		ingestionController.resumeImport
 	);
 
 	/**

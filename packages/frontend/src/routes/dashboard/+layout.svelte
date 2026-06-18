@@ -144,7 +144,8 @@
 	if (data.enterpriseMode) {
 		navItems = mergeNavItems(baseNavItems, enterpriseNavItems);
 	}
-	function handleLogout() {
+	async function handleLogout() {
+		await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' });
 		authStore.logout();
 		goto('/signin');
 	}

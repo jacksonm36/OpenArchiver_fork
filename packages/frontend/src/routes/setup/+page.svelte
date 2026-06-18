@@ -4,7 +4,6 @@
 	import * as Card from '$lib/components/ui/card';
 	import { Input } from '$lib/components/ui/input/index.js';
 	import { Label } from '$lib/components/ui/label/index.js';
-	import { api } from '$lib/api.client';
 	import { authStore } from '$lib/stores/auth.store';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte';
 	import { t } from '$lib/translations';
@@ -18,8 +17,10 @@
 	async function handleSubmit() {
 		isLoading = true;
 		try {
-			const response = await api('/auth/setup', {
+			const response = await fetch('/auth/setup', {
 				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				credentials: 'same-origin',
 				body: JSON.stringify({ first_name, last_name, email, password }),
 			});
 
@@ -28,8 +29,8 @@
 				throw new Error(errorData.message || 'An unknown error occurred.');
 			}
 
-			const { accessToken, user } = await response.json();
-			authStore.login(accessToken, user);
+			const { user } = await response.json();
+			authStore.login(user);
 			goto('/dashboard');
 		} catch (err: any) {
 			setAlert({

@@ -1,10 +1,13 @@
 import { Request, Response } from 'express';
 import { ArchivedEmailService } from '../../services/ArchivedEmailService';
+import { ExportService } from '../../services/ExportService';
 import { UserService } from '../../services/UserService';
 import { checkDeletionEnabled } from '../../helpers/deletionGuard';
+import { logger } from '../../config/logger';
 
 export class ArchivedEmailController {
 	private userService = new UserService();
+	private exportService = new ExportService();
 	public getArchivedEmails = async (req: Request, res: Response): Promise<Response> => {
 		try {
 			const { ingestionSourceId } = req.params;
@@ -94,6 +97,72 @@ export class ArchivedEmailController {
 				return res.status(500).json({ message: error.message });
 			}
 			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
+	public exportMbox = async (req: Request, res: Response): Promise<void> => {
+		try {
+			const userId = req.user?.sub;
+			if (!userId) {
+				res.status(401).json({ message: req.t('errors.unauthorized') });
+				return;
+			}
+			const ingestionSourceId = req.query.ingestionSourceId as string;
+			if (!ingestionSourceId) {
+				res.status(400).json({ message: req.t('export.ingestionSourceRequired') });
+				return;
+			}
+			await this.exportService.streamMboxExport(ingestionSourceId, userId, res, req);
+		} catch (error) {
+			logger.error({ err: error }, 'Mbox export failed');
+			if (!res.headersSent) {
+				res.status(500).json({ message: req.t('errors.internalServerError') });
+			}
+		}
+	};
+
+	public exportZip = async (req: Request, res: Response): Promise<void> => {
+		try {
+			const userId = req.user?.sub;
+			if (!userId) {
+				res.status(401).json({ message: req.t('errors.unauthorized') });
+				return;
+			}
+			const ingestionSourceId = req.query.ingestionSourceId as string;
+			if (!ingestionSourceId) {
+				res.status(400).json({ message: req.t('export.ingestionSourceRequired') });
+				return;
+			}
+			await this.exportService.streamZipExport(ingestionSourceId, userId, res, req);
+		} catch (error) {
+			logger.error({ err: error }, 'ZIP export failed');
+			if (!res.headersSent) {
+				res.status(500).json({ message: req.t('errors.internalServerError') });
+			}
+		}
+	};
+
+	public exportSingleEml = async (req: Request, res: Response): Promise<void> => {
+		try {
+			const userId = req.user?.sub;
+			if (!userId) {
+				res.status(401).json({ message: req.t('errors.unauthorized') });
+				return;
+			}
+			await this.exportService.streamSingleEmlExport(req.params.id, userId, res);
+		} catch (error) {
+			logger.error({ err: error, emailId: req.params.id }, 'EML export failed');
+			if (!res.headersSent) {
+				const message =
+					error instanceof Error && error.message === 'Archived email not found'
+						? req.t('archivedEmail.notFound')
+						: req.t('errors.internalServerError');
+				res.status(
+					error instanceof Error && error.message === 'Archived email not found'
+						? 404
+						: 500
+				).json({ message });
+			}
 		}
 	};
 }

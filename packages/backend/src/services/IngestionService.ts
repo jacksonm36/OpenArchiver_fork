@@ -8,9 +8,11 @@ import type {
 	IngestionProvider,
 	PendingEmail,
 	IndexingHint,
+	FileImportCheckpoint,
+	ResumeImportMode,
 	IngestionDiagnostics,
 } from '@open-archiver/types';
-import { and, desc, eq, inArray, or, count } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, count, sql } from 'drizzle-orm';
 import { CryptoService } from './CryptoService';
 import { EmailProviderFactory } from './EmailProviderFactory';
 import { ingestionQueue, indexingQueue } from '../jobs/queues';
@@ -35,9 +37,21 @@ import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { mapWithConcurrency } from '../helpers/parallel';
 import { SyncSessionService } from './SyncSessionService';
 import { validateFileImportCredentials } from '../helpers/localImportPath';
+import { getFileImportCheckpoint } from '../helpers/fileImportProgress';
+import { FileImportDedupCache } from '../helpers/fileImportDedupCache';
+import { hashReadableStream } from '../helpers/hashStream';
+import type { Readable } from 'stream';
+import { createReadStream } from 'fs';
+
+/** Max searchable body text stored in Redis indexing jobs (low-RAM hosts). */
+export const INDEXING_HINT_BODY_MAX_CHARS = 32_000;
 
 function buildIndexingHint(email: EmailObject): IndexingHint | undefined {
-	const body = email.body || email.html || '';
+	const rawBody = email.body || email.html || '';
+	const body =
+		rawBody.length > INDEXING_HINT_BODY_MAX_CHARS
+			? rawBody.slice(0, INDEXING_HINT_BODY_MAX_CHARS)
+			: rawBody;
 	// Only skip the indexing re-parse when the connector already extracted searchable text
 	// (e.g. PST fast path). Other connectors may only have content in the temp EML file.
 	if (!body && !email.emlAttachmentsStripped) {
@@ -85,7 +99,10 @@ export class IngestionService {
 		actorIp: string
 	): Promise<IngestionSource> {
 		const { providerConfig, mergedIntoId, ...rest } = dto;
-		await validateFileImportCredentials(rest.provider, providerConfig);
+		await validateFileImportCredentials(
+			rest.provider,
+			providerConfig as IngestionCredentials
+		);
 		const encryptedCredentials = CryptoService.encryptObject(providerConfig);
 
 		// Resolve merge target: if mergedIntoId points to a child, follow to the root.
@@ -209,7 +226,7 @@ export class IngestionService {
 		if (providerConfig) {
 			await validateFileImportCredentials(
 				rest.provider ?? originalSource.provider,
-				providerConfig
+				providerConfig as IngestionCredentials
 			);
 			// Encrypt the new credentials before updating
 			valuesToUpdate.credentials = CryptoService.encryptObject(providerConfig);
@@ -400,6 +417,100 @@ export class IngestionService {
 		await ingestionQueue.add('initial-import', { ingestionSourceId: source.id });
 	}
 
+	public static async mergeFileImportCheckpoint(
+		sourceId: string,
+		userEmail: string,
+		checkpoint: FileImportCheckpoint
+	): Promise<void> {
+		const mailboxPatch = JSON.stringify({ [userEmail]: checkpoint });
+		await db
+			.update(ingestionSources)
+			.set({
+				syncState: sql`jsonb_set(
+					COALESCE(${ingestionSources.syncState}, '{}'::jsonb),
+					'{fileImport}',
+					COALESCE(${ingestionSources.syncState}->'fileImport', '{}'::jsonb) || ${mailboxPatch}::jsonb
+				)`,
+			})
+			.where(eq(ingestionSources.id, sourceId));
+	}
+
+	public static canResumeFileImport(source: IngestionSource): boolean {
+		if (!this.returnFileBasedIngestions().includes(source.provider)) {
+			return false;
+		}
+		if (['importing', 'syncing'].includes(source.status)) {
+			return false;
+		}
+		const checkpoint = Object.values(source.syncState?.fileImport ?? {})[0];
+		if (checkpoint?.complete) {
+			return false;
+		}
+		return source.status === 'error' || checkpoint !== undefined;
+	}
+
+	public static async triggerResumeImport(
+		id: string,
+		mode: ResumeImportMode = 'import',
+		actor?: User,
+		actorIp?: string
+	): Promise<void> {
+		const source = await this.findById(id);
+		if (!source) {
+			throw new Error('Ingestion source not found');
+		}
+		if (!this.canResumeFileImport(source)) {
+			throw new Error('This ingestion source cannot be resumed.');
+		}
+
+		const connector = EmailProviderFactory.createConnector(source);
+		await connector.testConnection();
+
+		const jobTypes: JobType[] = ['active', 'waiting', 'failed', 'delayed', 'paused'];
+		const jobs = await ingestionQueue.getJobs(jobTypes);
+		for (const job of jobs) {
+			if (job.data.ingestionSourceId === id) {
+				try {
+					await job.remove();
+				} catch (error) {
+					logger.error({ err: error, jobId: job.id }, 'Failed to remove stale job before resume.');
+				}
+			}
+		}
+
+		const resumeLabel =
+			mode === 'dedup'
+				? 'Resuming duplicate scan from last processed message…'
+				: 'Resuming import from last processed message…';
+
+		await this.update(
+			id,
+			{
+				status: 'importing',
+				lastSyncStartedAt: new Date(),
+				lastSyncStatusMessage: resumeLabel,
+			},
+			actor,
+			actorIp
+		);
+
+		if (actor) {
+			await this.auditService.createAuditLog({
+				actorIdentifier: actor.id,
+				actionType: 'SYNC',
+				targetType: 'IngestionSource',
+				targetId: id,
+				actorIp: actorIp || 'unknown',
+				details: {
+					sourceName: source.name,
+					resumeMode: mode,
+				},
+			});
+		}
+
+		await ingestionQueue.add('initial-import', { ingestionSourceId: id, resumeMode: mode });
+	}
+
 	public static async triggerForceSync(id: string, actor: User, actorIp: string): Promise<void> {
 		const source = await this.findById(id);
 		logger.info({ ingestionSourceId: id }, 'Force syncing started.');
@@ -548,8 +659,12 @@ export class IngestionService {
 	 */
 	public static async doesEmailExist(
 		messageId: string,
-		ingestionSourceId: string
+		ingestionSourceId: string,
+		dedupCache?: FileImportDedupCache
 	): Promise<boolean> {
+		if (dedupCache?.hasMessageId(messageId)) {
+			return true;
+		}
 		const groupIds = await this.findGroupSourceIds(ingestionSourceId);
 		const sourceFilter =
 			groupIds.length === 1
@@ -566,14 +681,47 @@ export class IngestionService {
 			),
 			columns: { id: true },
 		});
+		if (existingEmail) {
+			dedupCache?.registerMessage(messageId);
+		}
 		return !!existingEmail;
+	}
+
+	public static async preloadExistingMessageIds(sourceId: string): Promise<{
+		knownMessageIds: Set<string>;
+		groupSourceIds: string[];
+	}> {
+		const groupIds = await this.findGroupSourceIds(sourceId);
+		const sourceFilter =
+			groupIds.length === 1
+				? eq(archivedEmails.ingestionSourceId, groupIds[0])
+				: inArray(archivedEmails.ingestionSourceId, groupIds);
+
+		const rows = await db
+			.select({
+				messageIdHeader: archivedEmails.messageIdHeader,
+				providerMessageId: archivedEmails.providerMessageId,
+			})
+			.from(archivedEmails)
+			.where(sourceFilter);
+
+		const knownMessageIds = new Set<string>();
+		for (const row of rows) {
+			if (row.messageIdHeader) knownMessageIds.add(row.messageIdHeader);
+			if (row.providerMessageId) knownMessageIds.add(row.providerMessageId);
+		}
+
+		return { knownMessageIds, groupSourceIds: groupIds };
 	}
 
 	public async processEmail(
 		email: EmailObject,
 		source: IngestionSource,
 		storage: StorageService,
-		userEmail: string
+		userEmail: string,
+		dedupCache?: FileImportDedupCache,
+		groupSourceIds?: string[],
+		knownMessageIds?: Set<string>
 	): Promise<PendingEmail | null> {
 		try {
 			// Read the raw bytes from the temp file written by the connector
@@ -603,18 +751,43 @@ export class IngestionService {
 			// Check if an email with the same message ID has already been imported
 			// within the merge group. This prevents duplicate imports when the same
 			// email exists in multiple mailboxes or across merged ingestion sources.
-			const groupIds = await IngestionService.findGroupSourceIds(source.id);
+			if (dedupCache?.hasMessageId(messageId)) {
+				logger.info(
+					{ messageId, ingestionSourceId: source.id },
+					'Skipping duplicate email (in-memory dedup cache)'
+				);
+				return null;
+			}
+
+			const groupIds = groupSourceIds ?? (await IngestionService.findGroupSourceIds(source.id));
 			const groupSourceFilter =
 				groupIds.length === 1
 					? eq(archivedEmails.ingestionSourceId, groupIds[0])
 					: inArray(archivedEmails.ingestionSourceId, groupIds);
 
+			if (knownMessageIds?.has(messageId)) {
+				dedupCache?.registerMessage(messageId);
+				logger.info(
+					{ messageId, ingestionSourceId: source.id },
+					'Skipping duplicate email (cached)'
+				);
+				return null;
+			}
+
 			const existingEmail = await db.query.archivedEmails.findFirst({
-				where: and(eq(archivedEmails.messageIdHeader, messageId), groupSourceFilter),
+				where: and(
+					groupSourceFilter,
+					or(
+						eq(archivedEmails.messageIdHeader, messageId),
+						eq(archivedEmails.providerMessageId, email.id)
+					)
+				),
 				columns: { id: true },
 			});
 
 			if (existingEmail) {
+				dedupCache?.registerMessage(messageId);
+				knownMessageIds?.add(messageId);
 				logger.info(
 					{ messageId, ingestionSourceId: source.id },
 					'Skipping duplicate email'
@@ -622,7 +795,11 @@ export class IngestionService {
 				return null;
 			}
 
-			const sanitizedPath = email.path ? email.path : '';
+			const sanitizedPath = email.path
+				? email.path.endsWith('/') || email.path.endsWith('\\')
+					? email.path
+					: `${email.path}/`
+				: '';
 			// Use effectiveSource (root) for storage path and DB ownership.
 			// Child sources are assistants; all content physically belongs to the root.
 			const emailPath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/emails/${sanitizedPath}${email.id}.eml`;
@@ -643,7 +820,10 @@ export class IngestionService {
 					columns: { id: true },
 				});
 
-				if (hashDuplicate) {
+				if (hashDuplicate || dedupCache?.hasContentHash(emailHash)) {
+					if (emailHash) {
+						dedupCache?.registerMessage(messageId, emailHash);
+					}
 					logger.info(
 						{ emailHash, ingestionSourceId: effectiveSource.id },
 						'Skipping duplicate email (hash-level dedup, preserve original mode)'
@@ -679,9 +859,20 @@ export class IngestionService {
 						path: email.path,
 						tags: email.tags,
 					})
+					.onConflictDoNothing()
 					.returning();
 
+				if (!archivedEmail) {
+					logger.info(
+						{ messageId, ingestionSourceId: effectiveSource.id },
+						'Skipping duplicate email (DB constraint, preserve original mode)'
+					);
+					return null;
+				}
+
 				const indexingHint = buildIndexingHint(email);
+				dedupCache?.registerMessage(messageId, emailHash);
+				knownMessageIds?.add(messageId);
 				return {
 					archivedEmailId: archivedEmail.id,
 					...(indexingHint ? { indexingHint } : {}),
@@ -695,6 +886,16 @@ export class IngestionService {
 				? rawEmlBuffer
 				: await stripAttachmentsFromEml(rawEmlBuffer);
 			const emailHash = createHash('sha256').update(emlBuffer).digest('hex');
+
+			if (dedupCache?.hasContentHash(emailHash)) {
+				dedupCache.registerMessage(messageId, emailHash);
+				logger.info(
+					{ emailHash, ingestionSourceId: effectiveSource.id },
+					'Skipping duplicate email (hash-level dedup cache)'
+				);
+				return null;
+			}
+
 			await storage.put(emailPath, emlBuffer);
 
 			const [archivedEmail] = await db
@@ -722,68 +923,177 @@ export class IngestionService {
 					path: email.path,
 					tags: email.tags,
 				})
+				.onConflictDoNothing()
 				.returning();
+
+			if (!archivedEmail) {
+				logger.info(
+					{ messageId, ingestionSourceId: effectiveSource.id },
+					'Skipping duplicate email (DB constraint)'
+				);
+				return null;
+			}
 
 			if (email.attachments.length > 0) {
 				await mapWithConcurrency(
 					email.attachments,
 					config.resources.attachmentStorageConcurrency,
 					async (attachment) => {
-						const attachmentBuffer = attachment.content;
-						const attachmentHash = createHash('sha256')
-							.update(attachmentBuffer)
-							.digest('hex');
+						const attachmentTempPath = attachment.tempFilePath;
+						const readContent = attachment.readContent;
+						const attachmentBuffer =
+							!attachmentTempPath && !readContent ? attachment.content : null;
 
-						const existingAttachment = await db.query.attachments.findFirst({
-							where: and(
-								eq(attachmentsSchema.contentHashSha256, attachmentHash),
-								eq(attachmentsSchema.ingestionSourceId, effectiveSource.id)
-							),
-						});
+						let attachmentId: string | undefined;
+						let attachmentHash = '';
+						let storedSize = attachment.size;
 
-						let attachmentId: string;
+						const resolveExistingAttachmentId = async (
+							hash: string
+						): Promise<string | undefined> => {
+							const cachedId = dedupCache?.getAttachmentId(hash);
+							if (cachedId) {
+								return cachedId;
+							}
+							const existingAttachment = await db.query.attachments.findFirst({
+								where: and(
+									eq(attachmentsSchema.contentHashSha256, hash),
+									eq(attachmentsSchema.ingestionSourceId, effectiveSource.id)
+								),
+							});
+							if (existingAttachment) {
+								dedupCache?.registerAttachmentHash(hash, existingAttachment.id);
+								logger.info(
+									{
+										attachmentHash: hash,
+										ingestionSourceId: effectiveSource.id,
+										reusedPath: existingAttachment.storagePath,
+									},
+									'Reusing existing attachment file for deduplication.'
+								);
+								return existingAttachment.id;
+							}
+							return undefined;
+						};
 
-						if (existingAttachment) {
-							attachmentId = existingAttachment.id;
-							logger.info(
-								{
-									attachmentHash,
-									ingestionSourceId: effectiveSource.id,
-									reusedPath: existingAttachment.storagePath,
-								},
-								'Reusing existing attachment file for deduplication.'
-							);
-						} else {
-							const uniqueId = randomUUID().slice(0, 7);
-							const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
-							await storage.put(storagePath, attachmentBuffer);
+						try {
+							if (readContent) {
+								const hashProbe = await hashReadableStream(readContent() as Readable);
+								attachmentHash = hashProbe.hash;
+								storedSize = hashProbe.size;
+								attachmentId = await resolveExistingAttachmentId(attachmentHash);
 
-							const [newRecord] = await db
-								.insert(attachmentsSchema)
+								if (!attachmentId) {
+									const uniqueId = randomUUID().slice(0, 7);
+									const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
+									const stored = await storage.putFromStreamWithHash(
+										storagePath,
+										readContent() as Readable
+									);
+									attachmentHash = stored.hash;
+									storedSize = stored.size;
+
+									const [newRecord] = await db
+										.insert(attachmentsSchema)
+										.values({
+											filename: attachment.filename,
+											mimeType: attachment.contentType,
+											sizeBytes: storedSize,
+											contentHashSha256: attachmentHash,
+											storagePath,
+											ingestionSourceId: effectiveSource.id,
+										})
+										.returning();
+									attachmentId = newRecord.id;
+									dedupCache?.registerAttachmentHash(attachmentHash, attachmentId);
+								}
+							} else if (attachmentTempPath) {
+								const hashProbe = await hashReadableStream(
+									createReadStream(attachmentTempPath)
+								);
+								attachmentHash = hashProbe.hash;
+								storedSize = hashProbe.size;
+								attachmentId = await resolveExistingAttachmentId(attachmentHash);
+
+								if (!attachmentId) {
+									const uniqueId = randomUUID().slice(0, 7);
+									const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
+									const stored = await storage.putFromFileWithHash(
+										storagePath,
+										attachmentTempPath
+									);
+									attachmentHash = stored.hash;
+									storedSize = stored.size;
+
+									const [newRecord] = await db
+										.insert(attachmentsSchema)
+										.values({
+											filename: attachment.filename,
+											mimeType: attachment.contentType,
+											sizeBytes: storedSize,
+											contentHashSha256: attachmentHash,
+											storagePath,
+											ingestionSourceId: effectiveSource.id,
+										})
+										.returning();
+									attachmentId = newRecord.id;
+									dedupCache?.registerAttachmentHash(attachmentHash, attachmentId);
+								}
+							} else {
+								attachmentHash = createHash('sha256')
+									.update(attachmentBuffer!)
+									.digest('hex');
+								attachmentId = await resolveExistingAttachmentId(attachmentHash);
+
+								if (!attachmentId) {
+									const uniqueId = randomUUID().slice(0, 7);
+									const storagePath = `${config.storage.openArchiverFolderName}/${effectiveSource.name.replaceAll(' ', '-')}-${effectiveSource.id}/attachments/${uniqueId}-${attachment.filename}`;
+									await storage.put(storagePath, attachmentBuffer!);
+
+									const [newRecord] = await db
+										.insert(attachmentsSchema)
+										.values({
+											filename: attachment.filename,
+											mimeType: attachment.contentType,
+											sizeBytes: attachment.size,
+											contentHashSha256: attachmentHash,
+											storagePath,
+											ingestionSourceId: effectiveSource.id,
+										})
+										.returning();
+									attachmentId = newRecord.id;
+									dedupCache?.registerAttachmentHash(attachmentHash, attachmentId);
+								}
+							}
+
+							if (!attachmentId) {
+								return;
+							}
+
+							await db
+								.insert(emailAttachments)
 								.values({
-									filename: attachment.filename,
-									mimeType: attachment.contentType,
-									sizeBytes: attachment.size,
-									contentHashSha256: attachmentHash,
-									storagePath,
-									ingestionSourceId: effectiveSource.id,
+									emailId: archivedEmail.id,
+									attachmentId,
 								})
-								.returning();
-							attachmentId = newRecord.id;
+								.onConflictDoNothing();
+						} finally {
+							if (attachmentTempPath) {
+								await unlink(attachmentTempPath).catch((err) =>
+									logger.warn(
+										{ err, attachmentTempPath },
+										'Failed to delete temp attachment file'
+									)
+								);
+							}
 						}
-
-						await db
-							.insert(emailAttachments)
-							.values({
-								emailId: archivedEmail.id,
-								attachmentId,
-							})
-							.onConflictDoNothing();
 					}
 				);
 			}
 
 			const indexingHint = buildIndexingHint(email);
+			dedupCache?.registerMessage(messageId, emailHash);
+			knownMessageIds?.add(messageId);
 			return {
 				archivedEmailId: archivedEmail.id,
 				...(indexingHint ? { indexingHint } : {}),
@@ -972,6 +1282,19 @@ export class IngestionService {
 				label,
 				isIndeterminate,
 			},
+			resume: (() => {
+				const canResume = this.canResumeFileImport(source);
+				const mailboxEmail = Object.keys(source.syncState?.fileImport ?? {})[0];
+				const checkpoint = mailboxEmail
+					? getFileImportCheckpoint(source.syncState, mailboxEmail)
+					: undefined;
+				return {
+					available: canResume,
+					lastGlobalIndex: checkpoint?.lastGlobalIndex ?? null,
+					lastMessageId: checkpoint?.lastMessageId ?? null,
+					lastPath: checkpoint?.lastPath ?? null,
+				};
+			})(),
 		};
 	}
 }
