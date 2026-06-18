@@ -20,6 +20,7 @@ const IMPORT_EXTENSIONS: Record<IngestionProvider, string[]> = {
 	generic_imap: [],
 	google_workspace: [],
 	microsoft_365: [],
+	smtp_journaling: [],
 };
 
 function extensionMatches(filename: string, extensions: string[]): boolean {

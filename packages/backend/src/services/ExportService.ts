@@ -69,7 +69,7 @@ export class ExportService {
 			const content = await this.storage.readPlaintext(row.storagePath);
 			parts.push({
 				filename: row.filename,
-				contentType: row.mimeType,
+				contentType: row.mimeType ?? 'application/octet-stream',
 				content,
 			});
 		}
@@ -231,7 +231,7 @@ export class ExportService {
 					progress.aborted = true;
 					break;
 				}
-				if (!body.endsWith('\n')) {
+				if (body.length === 0 || body[body.length - 1] !== 0x0a) {
 					if (!(await writeResponseChunk(res, '\n'))) {
 						progress.aborted = true;
 						break;
