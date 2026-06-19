@@ -51,6 +51,48 @@
 		}
 	}
 
+	function sanitizeProviderConfig(
+		provider: IngestionProvider,
+		config: Record<string, unknown>
+	): Record<string, unknown> {
+		const base = createProviderConfig(provider);
+		const merged = { ...base, ...config };
+		for (const key of Object.keys(base)) {
+			const expected = base[key];
+			const actual = merged[key];
+			if (actual === null || actual === undefined) {
+				merged[key] = expected;
+			} else if (typeof expected === 'string' && typeof actual !== 'string') {
+				merged[key] = String(actual);
+			} else if (typeof expected === 'number' && typeof actual !== 'number') {
+				const parsed = Number(actual);
+				merged[key] = Number.isFinite(parsed) ? parsed : expected;
+			} else if (typeof expected === 'boolean' && typeof actual !== 'boolean') {
+				merged[key] = Boolean(actual);
+			}
+		}
+		return merged;
+	}
+
+	function configStr(key: string): string {
+		const value = providerConfig[key];
+		return typeof value === 'string' ? value : '';
+	}
+
+	function setConfigStr(key: string, value: string) {
+		providerConfig[key] = value;
+	}
+
+	function configNum(key: string, fallback: number): number {
+		const value = providerConfig[key];
+		return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+	}
+
+	function setConfigNum(key: string, raw: string, fallback: number) {
+		const parsed = Number.parseInt(raw, 10);
+		providerConfig[key] = Number.isFinite(parsed) ? parsed : fallback;
+	}
+
 	const FILE_IMPORT_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
 
 	type FileImportProvider = (typeof FILE_IMPORT_PROVIDERS)[number];
@@ -122,25 +164,37 @@
 	const initialProvider = (source?.provider ?? 'generic_imap') as IngestionProvider;
 
 	function initialProviderConfig(): Record<string, unknown> {
-		const base = createProviderConfig(initialProvider);
 		if (source?.providerConfig && typeof source.providerConfig === 'object') {
-			return { ...base, ...(source.providerConfig as Record<string, unknown>) };
+			return sanitizeProviderConfig(
+				initialProvider,
+				source.providerConfig as Record<string, unknown>
+			);
 		}
-		return base;
+		return createProviderConfig(initialProvider);
 	}
+
+	const initialConfig = initialProviderConfig();
 
 	let name = $state(source?.name ?? '');
 	let selectedProvider = $state<IngestionProvider>(initialProvider);
-	let providerConfig = $state<Record<string, unknown>>(initialProviderConfig());
+	let providerConfig = $state<Record<string, unknown>>(initialConfig);
+	let localFilePath = $state(
+		isFileImportProvider(initialProvider) && typeof initialConfig.localFilePath === 'string'
+			? initialConfig.localFilePath
+			: ''
+	);
 	let preserveOriginalFile = $state(Boolean(source?.preserveOriginalFile ?? false));
 	let streamAttachmentsOnImport = $state(Boolean(source?.streamAttachmentsOnImport ?? true));
 	let mergedIntoId = $state<string | undefined>(undefined);
 
 	function buildFormData(): CreateIngestionSourceDto {
+		const config = isFileImportProvider(selectedProvider)
+			? { ...providerConfig, localFilePath }
+			: providerConfig;
 		return {
 			name,
 			provider: selectedProvider,
-			providerConfig,
+			providerConfig: config,
 			preserveOriginalFile,
 			streamAttachmentsOnImport,
 			...(mergedIntoId ? { mergedIntoId } : {}),
@@ -154,6 +208,7 @@
 		selectedProvider = provider;
 		providerConfig = createProviderConfig(provider);
 		if (isFileImportProvider(provider)) {
+			localFilePath = '';
 			importMethod = 'local';
 			fileUploading = false;
 			uploadProgress = null;
@@ -169,7 +224,7 @@
 			return;
 		}
 		if (method === 'upload') {
-			providerConfig.localFilePath = '';
+			localFilePath = '';
 		} else {
 			providerConfig.uploadedFilePath = '';
 			providerConfig.uploadedFileName = '';
@@ -224,9 +279,13 @@
 
 	/** When merge is toggled off, clear the target source */
 	function setMergeEnabled(enabled: boolean) {
-		mergeEnabled = enabled;
-		if (!enabled) {
+		mergeEnabled = enabled === true;
+		if (!mergeEnabled) {
 			mergedIntoId = undefined;
+			return;
+		}
+		if (!mergedIntoId && mergeableRootSources.length > 0) {
+			mergedIntoId = mergeableRootSources[0].id;
 		}
 	}
 
@@ -238,11 +297,8 @@
 			isFileImport && (importMethod === 'local' || importSettings?.localPathOnly);
 
 		if (useLocalPath) {
-			const localPath =
-				typeof providerConfig.localFilePath === 'string'
-					? providerConfig.localFilePath.trim()
-					: '';
-			if (!localPath) {
+			const path = localFilePath.trim();
+			if (!path) {
 				setAlert({
 					type: 'error',
 					title: $t('app.components.ingestion_source_form.local_path_required_title'),
@@ -375,7 +431,9 @@
 					'app.components.ingestion_source_form.service_account_key_placeholder'
 				)}
 				id="serviceAccountKeyJson"
-				bind:value={providerConfig.serviceAccountKeyJson}
+				value={configStr('serviceAccountKeyJson')}
+				oninput={(event) =>
+					setConfigStr('serviceAccountKeyJson', event.currentTarget.value)}
 				class="col-span-3 max-h-32"
 			/>
 		</div>
@@ -385,7 +443,9 @@
 			>
 			<Input
 				id="impersonatedAdminEmail"
-				bind:value={providerConfig.impersonatedAdminEmail}
+				value={configStr('impersonatedAdminEmail')}
+				oninput={(event) =>
+					setConfigStr('impersonatedAdminEmail', event.currentTarget.value)}
 				class="col-span-3"
 			/>
 		</div>
@@ -394,7 +454,12 @@
 			<Label for="clientId" class="text-left"
 				>{$t('app.components.ingestion_source_form.client_id')}</Label
 			>
-			<Input id="clientId" bind:value={providerConfig.clientId} class="col-span-3" />
+			<Input
+				id="clientId"
+				value={configStr('clientId')}
+				oninput={(event) => setConfigStr('clientId', event.currentTarget.value)}
+				class="col-span-3"
+			/>
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="clientSecret" class="text-left"
@@ -404,7 +469,8 @@
 				id="clientSecret"
 				type="password"
 				placeholder={$t('app.components.ingestion_source_form.client_secret_placeholder')}
-				bind:value={providerConfig.clientSecret}
+				value={configStr('clientSecret')}
+				oninput={(event) => setConfigStr('clientSecret', event.currentTarget.value)}
 				class="col-span-3"
 			/>
 		</div>
@@ -412,14 +478,24 @@
 			<Label for="tenantId" class="text-left"
 				>{$t('app.components.ingestion_source_form.tenant_id')}</Label
 			>
-			<Input id="tenantId" bind:value={providerConfig.tenantId} class="col-span-3" />
+			<Input
+				id="tenantId"
+				value={configStr('tenantId')}
+				oninput={(event) => setConfigStr('tenantId', event.currentTarget.value)}
+				class="col-span-3"
+			/>
 		</div>
 	{:else if selectedProvider === 'generic_imap'}
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="host" class="text-left"
 				>{$t('app.components.ingestion_source_form.host')}</Label
 			>
-			<Input id="host" bind:value={providerConfig.host} class="col-span-3" />
+			<Input
+				id="host"
+				value={configStr('host')}
+				oninput={(event) => setConfigStr('host', event.currentTarget.value)}
+				class="col-span-3"
+			/>
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="port" class="text-left"
@@ -428,7 +504,8 @@
 			<Input
 				id="port"
 				type="number"
-				bind:value={providerConfig.port}
+				value={configNum('port', 993)}
+				oninput={(event) => setConfigNum('port', event.currentTarget.value, 993)}
 				class="col-span-3"
 			/>
 		</div>
@@ -436,14 +513,20 @@
 			<Label for="username" class="text-left"
 				>{$t('app.components.ingestion_source_form.username')}</Label
 			>
-			<Input id="username" bind:value={providerConfig.username} class="col-span-3" />
+			<Input
+				id="username"
+				value={configStr('username')}
+				oninput={(event) => setConfigStr('username', event.currentTarget.value)}
+				class="col-span-3"
+			/>
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="password" class="text-left">{$t('app.auth.password')}</Label>
 			<Input
 				id="password"
 				type="password"
-				bind:value={providerConfig.password}
+				value={configStr('password')}
+				oninput={(event) => setConfigStr('password', event.currentTarget.value)}
 				class="col-span-3"
 			/>
 		</div>
@@ -455,7 +538,7 @@
 				id="secure"
 				checked={providerConfig.secure === true}
 				onCheckedChange={(checked) => {
-					providerConfig.secure = checked;
+					providerConfig.secure = checked === true;
 				}}
 			/>
 		</div>
@@ -467,7 +550,7 @@
 				id="allowInsecureCert"
 				checked={providerConfig.allowInsecureCert === true}
 				onCheckedChange={(checked) => {
-					providerConfig.allowInsecureCert = checked;
+					providerConfig.allowInsecureCert = checked === true;
 				}}
 			/>
 		</div>
@@ -555,14 +638,14 @@
 					<div class="col-span-3 space-y-3">
 						<Input
 							id="{activeFileImportProvider}-local-path"
-							bind:value={providerConfig.localFilePath}
+							bind:value={localFilePath}
 							placeholder={activeFileImportMeta.placeholder}
 							required
 						/>
 						<LocalImportFilePicker
 							provider={activeFileImportProvider}
 							settings={importSettings}
-							bind:value={providerConfig.localFilePath}
+							bind:value={localFilePath}
 						/>
 					</div>
 				</div>
@@ -620,7 +703,7 @@
 							id="streamAttachmentsOnImport"
 							checked={streamAttachmentsOnImport === true}
 							onCheckedChange={(checked) => {
-								streamAttachmentsOnImport = checked;
+								streamAttachmentsOnImport = checked === true;
 							}}
 						/>
 					</div>
@@ -651,7 +734,7 @@
 						id="preserveOriginalFile"
 						checked={preserveOriginalFile === true}
 						onCheckedChange={(checked) => {
-							preserveOriginalFile = checked;
+							preserveOriginalFile = checked === true;
 						}}
 					/>
 				</div>
@@ -686,15 +769,17 @@
 						/>
 					</div>
 
-					{#if mergeEnabled}
+					{#if mergeEnabled && mergedIntoId}
 						<div class="grid grid-cols-4 items-center gap-4">
 							<div class="col-span-1"></div>
 							<div class="col-span-3">
 								<Select.Root
 									name="mergedIntoId"
-									value={mergedIntoId ?? ''}
+									value={mergedIntoId}
 									onValueChange={(value) => {
-										mergedIntoId = value || undefined;
+										if (value) {
+											mergedIntoId = value;
+										}
 									}}
 									type="single"
 								>

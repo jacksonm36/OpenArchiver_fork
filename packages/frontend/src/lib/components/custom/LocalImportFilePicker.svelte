@@ -14,12 +14,14 @@
 	let {
 		provider,
 		settings,
-		value = $bindable(''),
+		value = $bindable<string | undefined>(),
 	}: {
 		provider: IngestionProvider;
 		settings: IImportSettings | null;
 		value?: string;
 	} = $props();
+
+	const selectedPath = $derived(value ?? '');
 
 	let listing = $state<IImportDirectoryListing | null>(null);
 	let loading = $state(false);
@@ -128,7 +130,7 @@
 							{:else}
 								<button
 									type="button"
-									class="hover:bg-muted flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm {value ===
+									class="hover:bg-muted flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm {selectedPath ===
 									entry.path
 										? 'bg-muted'
 										: ''}"
