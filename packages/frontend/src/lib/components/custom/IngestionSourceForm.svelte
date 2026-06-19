@@ -121,20 +121,38 @@
 
 	const initialProvider = (source?.provider ?? 'generic_imap') as IngestionProvider;
 
-	let formData: CreateIngestionSourceDto = $state({
-		name: source?.name ?? '',
-		provider: initialProvider,
-		providerConfig: createProviderConfig(initialProvider),
-		preserveOriginalFile: Boolean(source?.preserveOriginalFile ?? false),
-		streamAttachmentsOnImport: Boolean(source?.streamAttachmentsOnImport ?? true),
-	});
+	function initialProviderConfig(): Record<string, unknown> {
+		const base = createProviderConfig(initialProvider);
+		if (source?.providerConfig && typeof source.providerConfig === 'object') {
+			return { ...base, ...(source.providerConfig as Record<string, unknown>) };
+		}
+		return base;
+	}
+
+	let name = $state(source?.name ?? '');
+	let selectedProvider = $state<IngestionProvider>(initialProvider);
+	let providerConfig = $state<Record<string, unknown>>(initialProviderConfig());
+	let preserveOriginalFile = $state(Boolean(source?.preserveOriginalFile ?? false));
+	let streamAttachmentsOnImport = $state(Boolean(source?.streamAttachmentsOnImport ?? true));
+	let mergedIntoId = $state<string | undefined>(undefined);
+
+	function buildFormData(): CreateIngestionSourceDto {
+		return {
+			name,
+			provider: selectedProvider,
+			providerConfig,
+			preserveOriginalFile,
+			streamAttachmentsOnImport,
+			...(mergedIntoId ? { mergedIntoId } : {}),
+		};
+	}
 
 	function setProvider(provider: IngestionProvider) {
-		if (formData.provider === provider) {
+		if (selectedProvider === provider) {
 			return;
 		}
-		formData.provider = provider;
-		formData.providerConfig = createProviderConfig(provider);
+		selectedProvider = provider;
+		providerConfig = createProviderConfig(provider);
 		if (isFileImportProvider(provider)) {
 			importMethod = 'local';
 			fileUploading = false;
@@ -147,20 +165,19 @@
 			return;
 		}
 		importMethod = method;
-		if (!isFileImportProvider(formData.provider)) {
+		if (!isFileImportProvider(selectedProvider)) {
 			return;
 		}
-		const config = formData.providerConfig;
 		if (method === 'upload') {
-			config.localFilePath = '';
+			providerConfig.localFilePath = '';
 		} else {
-			config.uploadedFilePath = '';
-			config.uploadedFileName = '';
+			providerConfig.uploadedFilePath = '';
+			providerConfig.uploadedFileName = '';
 		}
 	}
 
 	const triggerContent = $derived(
-		providerOptions.find((p) => p.value === formData.provider)?.label ??
+		providerOptions.find((p) => p.value === selectedProvider)?.label ??
 			$t('app.components.ingestion_source_form.select_provider')
 	);
 
@@ -174,7 +191,7 @@
 	let importSettings = $state<IImportSettings | null>(null);
 
 	const activeFileImportProvider = $derived(
-		isFileImportProvider(formData.provider) ? formData.provider : null
+		isFileImportProvider(selectedProvider) ? selectedProvider : null
 	);
 
 	const activeFileImportMeta = $derived(
@@ -205,24 +222,25 @@
 		}
 	});
 
-	/** When merge is toggled off, clear the mergedIntoId */
-	$effect(() => {
-		if (!mergeEnabled) {
-			delete formData.mergedIntoId;
+	/** When merge is toggled off, clear the target source */
+	function setMergeEnabled(enabled: boolean) {
+		mergeEnabled = enabled;
+		if (!enabled) {
+			mergedIntoId = undefined;
 		}
-	});
+	}
 
 	const handleSubmit = async (event: Event) => {
 		event.preventDefault();
 
-		const isFileImport = isFileImportProvider(formData.provider);
+		const isFileImport = isFileImportProvider(selectedProvider);
 		const useLocalPath =
 			isFileImport && (importMethod === 'local' || importSettings?.localPathOnly);
 
 		if (useLocalPath) {
 			const localPath =
-				'localFilePath' in formData.providerConfig
-					? formData.providerConfig.localFilePath?.trim()
+				typeof providerConfig.localFilePath === 'string'
+					? providerConfig.localFilePath.trim()
 					: '';
 			if (!localPath) {
 				setAlert({
@@ -236,8 +254,8 @@
 			}
 		} else if (isFileImport && importMethod === 'upload') {
 			const uploadedPath =
-				'uploadedFilePath' in formData.providerConfig
-					? formData.providerConfig.uploadedFilePath?.trim()
+				typeof providerConfig.uploadedFilePath === 'string'
+					? providerConfig.uploadedFilePath.trim()
 					: '';
 			if (!uploadedPath) {
 				setAlert({
@@ -253,7 +271,7 @@
 
 		isSubmitting = true;
 		try {
-			await onSubmit(formData);
+			await onSubmit(buildFormData());
 		} finally {
 			isSubmitting = false;
 		}
@@ -292,8 +310,8 @@
 				uploadProgress = progress;
 			});
 
-			formData.providerConfig.uploadedFilePath = result.filePath;
-			formData.providerConfig.uploadedFileName = file.name;
+			providerConfig.uploadedFilePath = result.filePath;
+			providerConfig.uploadedFileName = file.name;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			setAlert({
@@ -311,8 +329,8 @@
 	};
 
 	const mergeTriggerContent = $derived(
-		formData.mergedIntoId
-			? (mergeableRootSources.find((s) => s.id === formData.mergedIntoId)?.name ??
+		mergedIntoId
+			? (mergeableRootSources.find((s) => s.id === mergedIntoId)?.name ??
 					$t('app.components.ingestion_source_form.merge_into_select'))
 			: $t('app.components.ingestion_source_form.merge_into_select')
 	);
@@ -321,14 +339,14 @@
 <form onsubmit={handleSubmit} class="grid gap-4 py-4">
 	<div class="grid grid-cols-4 items-center gap-4">
 		<Label for="name" class="text-left">{$t('app.ingestions.name')}</Label>
-		<Input id="name" bind:value={formData.name} class="col-span-3" />
+		<Input id="name" bind:value={name} class="col-span-3" />
 	</div>
 	<div class="grid grid-cols-4 items-center gap-4">
 		<Label for="provider" class="text-left">{$t('app.ingestions.provider')}</Label>
 		<Select.Root
 			name="provider"
 			type="single"
-			value={formData.provider}
+			value={selectedProvider}
 			onValueChange={(value) => {
 				if (value) {
 					setProvider(value as IngestionProvider);
@@ -346,8 +364,8 @@
 		</Select.Root>
 	</div>
 
-	{#key formData.provider}
-	{#if formData.provider === 'google_workspace'}
+	{#key selectedProvider}
+	{#if selectedProvider === 'google_workspace'}
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="serviceAccountKeyJson" class="text-left"
 				>{$t('app.components.ingestion_source_form.service_account_key')}</Label
@@ -357,7 +375,7 @@
 					'app.components.ingestion_source_form.service_account_key_placeholder'
 				)}
 				id="serviceAccountKeyJson"
-				bind:value={formData.providerConfig.serviceAccountKeyJson}
+				bind:value={providerConfig.serviceAccountKeyJson}
 				class="col-span-3 max-h-32"
 			/>
 		</div>
@@ -367,16 +385,16 @@
 			>
 			<Input
 				id="impersonatedAdminEmail"
-				bind:value={formData.providerConfig.impersonatedAdminEmail}
+				bind:value={providerConfig.impersonatedAdminEmail}
 				class="col-span-3"
 			/>
 		</div>
-	{:else if formData.provider === 'microsoft_365'}
+	{:else if selectedProvider === 'microsoft_365'}
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="clientId" class="text-left"
 				>{$t('app.components.ingestion_source_form.client_id')}</Label
 			>
-			<Input id="clientId" bind:value={formData.providerConfig.clientId} class="col-span-3" />
+			<Input id="clientId" bind:value={providerConfig.clientId} class="col-span-3" />
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="clientSecret" class="text-left"
@@ -386,7 +404,7 @@
 				id="clientSecret"
 				type="password"
 				placeholder={$t('app.components.ingestion_source_form.client_secret_placeholder')}
-				bind:value={formData.providerConfig.clientSecret}
+				bind:value={providerConfig.clientSecret}
 				class="col-span-3"
 			/>
 		</div>
@@ -394,14 +412,14 @@
 			<Label for="tenantId" class="text-left"
 				>{$t('app.components.ingestion_source_form.tenant_id')}</Label
 			>
-			<Input id="tenantId" bind:value={formData.providerConfig.tenantId} class="col-span-3" />
+			<Input id="tenantId" bind:value={providerConfig.tenantId} class="col-span-3" />
 		</div>
-	{:else if formData.provider === 'generic_imap'}
+	{:else if selectedProvider === 'generic_imap'}
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="host" class="text-left"
 				>{$t('app.components.ingestion_source_form.host')}</Label
 			>
-			<Input id="host" bind:value={formData.providerConfig.host} class="col-span-3" />
+			<Input id="host" bind:value={providerConfig.host} class="col-span-3" />
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="port" class="text-left"
@@ -410,7 +428,7 @@
 			<Input
 				id="port"
 				type="number"
-				bind:value={formData.providerConfig.port}
+				bind:value={providerConfig.port}
 				class="col-span-3"
 			/>
 		</div>
@@ -418,14 +436,14 @@
 			<Label for="username" class="text-left"
 				>{$t('app.components.ingestion_source_form.username')}</Label
 			>
-			<Input id="username" bind:value={formData.providerConfig.username} class="col-span-3" />
+			<Input id="username" bind:value={providerConfig.username} class="col-span-3" />
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="password" class="text-left">{$t('app.auth.password')}</Label>
 			<Input
 				id="password"
 				type="password"
-				bind:value={formData.providerConfig.password}
+				bind:value={providerConfig.password}
 				class="col-span-3"
 			/>
 		</div>
@@ -435,9 +453,9 @@
 			>
 			<Checkbox
 				id="secure"
-				checked={formData.providerConfig.secure === true}
+				checked={providerConfig.secure === true}
 				onCheckedChange={(checked) => {
-					formData.providerConfig.secure = checked;
+					providerConfig.secure = checked;
 				}}
 			/>
 		</div>
@@ -447,9 +465,9 @@
 			>
 			<Checkbox
 				id="allowInsecureCert"
-				checked={formData.providerConfig.allowInsecureCert === true}
+				checked={providerConfig.allowInsecureCert === true}
 				onCheckedChange={(checked) => {
-					formData.providerConfig.allowInsecureCert = checked;
+					providerConfig.allowInsecureCert = checked;
 				}}
 			/>
 		</div>
@@ -537,21 +555,22 @@
 					<div class="col-span-3 space-y-3">
 						<Input
 							id="{activeFileImportProvider}-local-path"
-							bind:value={formData.providerConfig.localFilePath}
+							bind:value={providerConfig.localFilePath}
 							placeholder={activeFileImportMeta.placeholder}
 							required
 						/>
 						<LocalImportFilePicker
 							provider={activeFileImportProvider}
 							settings={importSettings}
-							bind:value={formData.providerConfig.localFilePath}
+							bind:value={providerConfig.localFilePath}
 						/>
 					</div>
 				</div>
 			{/if}
 		{/key}
+	{/if}
 	{/key}
-	{#if formData.provider === 'google_workspace' || formData.provider === 'microsoft_365'}
+	{#if selectedProvider === 'google_workspace' || selectedProvider === 'microsoft_365'}
 		<Alert.Root>
 			<Alert.Title>{$t('app.components.ingestion_source_form.heads_up')}</Alert.Title>
 			<Alert.Description>
@@ -575,7 +594,7 @@
 
 		{#if showAdvanced}
 			<div class="mt-3 grid gap-4">
-				{#if isFileImportProvider(formData.provider)}
+				{#if isFileImportProvider(selectedProvider)}
 					<div class="grid grid-cols-4 items-center gap-4">
 						<div class="flex items-center gap-1 text-left">
 							<Label for="streamAttachmentsOnImport"
@@ -599,9 +618,9 @@
 						</div>
 						<Switch
 							id="streamAttachmentsOnImport"
-							checked={formData.streamAttachmentsOnImport === true}
+							checked={streamAttachmentsOnImport === true}
 							onCheckedChange={(checked) => {
-								formData.streamAttachmentsOnImport = checked;
+								streamAttachmentsOnImport = checked;
 							}}
 						/>
 					</div>
@@ -630,9 +649,9 @@
 					</div>
 					<Checkbox
 						id="preserveOriginalFile"
-						checked={formData.preserveOriginalFile === true}
+						checked={preserveOriginalFile === true}
 						onCheckedChange={(checked) => {
-							formData.preserveOriginalFile = checked;
+							preserveOriginalFile = checked;
 						}}
 					/>
 				</div>
@@ -662,7 +681,7 @@
 							id="mergeEnabled"
 							checked={mergeEnabled}
 							onCheckedChange={(checked) => {
-								mergeEnabled = checked;
+								setMergeEnabled(checked);
 							}}
 						/>
 					</div>
@@ -673,9 +692,9 @@
 							<div class="col-span-3">
 								<Select.Root
 									name="mergedIntoId"
-									value={formData.mergedIntoId ?? ''}
+									value={mergedIntoId ?? ''}
 									onValueChange={(value) => {
-										formData.mergedIntoId = value || undefined;
+										mergedIntoId = value || undefined;
 									}}
 									type="single"
 								>
