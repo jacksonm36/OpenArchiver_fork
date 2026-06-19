@@ -28,3 +28,7 @@ docs/.vitepress/cache
 
 # TS
 **/tsconfig.tsbuildinfo
+
+# Local PST/Mbox import test files (mounted into Docker)
+/data/imports/*
+!/data/imports/.gitkeep

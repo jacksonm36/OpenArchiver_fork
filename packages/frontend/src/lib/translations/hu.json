@@ -126,7 +126,14 @@
 			"resume_dedup_description": "Gyorsan átlép a már archivált üzeneteken (duplikátum kihagyása) az utolsó ellenőrzőponttól.",
 			"resume_checkpoint": "Utoljára feldolgozva: #{{index}}. üzenet",
 			"resume_import_success": "Az import folytatása sorba állítva",
-			"resume_import_failed": "Az import folytatása sikertelen"
+			"resume_import_failed": "Az import folytatása sikertelen",
+			"pause_import": "Import szüneteltetése",
+			"pause_import_success": "Import szüneteltetve",
+			"pause_import_failed": "Az import szüneteltetése sikertelen",
+			"stop_import": "Import leállítása",
+			"stop_import_success": "Import leállítva",
+			"stop_import_failed": "Az import leállítása sikertelen",
+			"restart_import": "Import újraindítása"
 		},
 		"search": {
 			"title": "Keresés",
@@ -395,6 +402,8 @@
 			"sender": "Feladó",
 			"inbox": "Postaláda",
 			"path": "Elérési út",
+			"folders": "Mappák",
+			"all_mail": "Összes levél",
 			"actions": "Műveletek",
 			"view": "Megtekintés",
 			"no_emails_found": "Nem található archivált e-mail.",

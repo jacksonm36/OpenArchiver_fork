@@ -1,4 +1,4 @@
-import { count, desc, eq, asc, and, inArray } from 'drizzle-orm';
+import { count, desc, eq, asc, and, inArray, isNotNull } from 'drizzle-orm';
 import { db } from '../database';
 import {
 	archivedEmails,
@@ -13,6 +13,7 @@ import type {
 	ArchivedEmail,
 	Recipient,
 	ThreadEmail,
+	ArchiveFolderNode,
 } from '@open-archiver/types';
 import { StorageService } from './StorageService';
 import { SearchService } from './SearchService';
@@ -24,6 +25,7 @@ import { checkDeletionEnabled } from '../helpers/deletionGuard';
 import { RetentionHook } from '../hooks/RetentionHook';
 import { logger } from '../config/logger';
 import { MAX_RAW_EMAIL_API_BYTES } from '../config/emailApi';
+import { buildFolderTree } from '../helpers/buildFolderTree';
 
 interface DbRecipients {
 	to: { name: string; address: string }[];
@@ -57,7 +59,8 @@ export class ArchivedEmailService {
 		ingestionSourceId: string,
 		page: number,
 		limit: number,
-		userId: string
+		userId: string,
+		folderPath?: string | null
 	): Promise<PaginatedArchivedEmails> {
 		const offset = (page - 1) * limit;
 		const { drizzleFilter } = await FilterBuilder.create(userId, 'archive', 'read');
@@ -68,7 +71,11 @@ export class ArchivedEmailService {
 			groupIds.length === 1
 				? eq(archivedEmails.ingestionSourceId, groupIds[0])
 				: inArray(archivedEmails.ingestionSourceId, groupIds);
-		const where = and(sourceFilter, drizzleFilter);
+		let where = and(sourceFilter, drizzleFilter);
+
+		if (folderPath) {
+			where = and(where, eq(archivedEmails.path, folderPath));
+		}
 
 		const countQuery = db
 			.select({
@@ -109,6 +116,36 @@ export class ArchivedEmailService {
 			page,
 			limit,
 		};
+	}
+
+	public static async getFolderTree(
+		ingestionSourceId: string,
+		userId: string
+	): Promise<ArchiveFolderNode[]> {
+		const { drizzleFilter } = await FilterBuilder.create(userId, 'archive', 'read');
+
+		const groupIds = await IngestionService.findGroupSourceIds(ingestionSourceId);
+		const sourceFilter =
+			groupIds.length === 1
+				? eq(archivedEmails.ingestionSourceId, groupIds[0])
+				: inArray(archivedEmails.ingestionSourceId, groupIds);
+		const where = and(sourceFilter, drizzleFilter, isNotNull(archivedEmails.path));
+
+		const rows = await db
+			.select({
+				path: archivedEmails.path,
+				count: count(archivedEmails.id),
+			})
+			.from(archivedEmails)
+			.leftJoin(ingestionSources, eq(archivedEmails.ingestionSourceId, ingestionSources.id))
+			.where(where)
+			.groupBy(archivedEmails.path);
+
+		const entries = rows
+			.filter((row): row is { path: string; count: number } => row.path != null)
+			.map((row) => ({ path: row.path, count: row.count }));
+
+		return buildFolderTree(entries);
 	}
 
 	public static async getArchivedEmailById(

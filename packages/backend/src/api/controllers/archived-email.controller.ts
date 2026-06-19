@@ -13,6 +13,7 @@ export class ArchivedEmailController {
 			const { ingestionSourceId } = req.params;
 			const page = parseInt(req.query.page as string, 10) || 1;
 			const limit = parseInt(req.query.limit as string, 10) || 10;
+			const folderPath = (req.query.path as string) || null;
 			const userId = req.user?.sub;
 
 			if (!userId) {
@@ -23,11 +24,29 @@ export class ArchivedEmailController {
 				ingestionSourceId,
 				page,
 				limit,
-				userId
+				userId,
+				folderPath
 			);
 			return res.status(200).json(result);
 		} catch (error) {
 			console.error('Get archived emails error:', error);
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
+	public getFolderTree = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { ingestionSourceId } = req.params;
+			const userId = req.user?.sub;
+
+			if (!userId) {
+				return res.status(401).json({ message: req.t('errors.unauthorized') });
+			}
+
+			const tree = await ArchivedEmailService.getFolderTree(ingestionSourceId, userId);
+			return res.status(200).json(tree);
+		} catch (error) {
+			console.error('Get archive folder tree error:', error);
 			return res.status(500).json({ message: req.t('errors.internalServerError') });
 		}
 	};

@@ -199,9 +199,22 @@ export class IngestionController {
 			if (!actor) {
 				return res.status(401).json({ message: req.t('errors.unauthorized') });
 			}
+			const source = await IngestionService.findById(id);
+			if (!source) {
+				return res.status(404).json({ message: req.t('ingestion.notFound') });
+			}
+			if (['importing', 'syncing'].includes(source.status)) {
+				await IngestionService.cancelJobsForSource(id);
+			}
 			const updatedSource = await IngestionService.update(
 				id,
-				{ status: 'paused' },
+				{
+					status: 'paused',
+					lastSyncStatusMessage:
+						source.status === 'importing' || source.status === 'syncing'
+							? 'Import paused by user.'
+							: 'Continuous sync paused.',
+				},
 				actor,
 				req.ip || 'unknown'
 			);
@@ -209,6 +222,29 @@ export class IngestionController {
 			return res.status(200).json(safeSource);
 		} catch (error) {
 			console.error(`Pause ingestion source ${req.params.id} error:`, error);
+			if (error instanceof Error && error.message === 'Ingestion source not found') {
+				return res.status(404).json({ message: req.t('ingestion.notFound') });
+			}
+			return res.status(500).json({ message: req.t('errors.internalServerError') });
+		}
+	};
+
+	public stopImport = async (req: Request, res: Response): Promise<Response> => {
+		try {
+			const { id } = req.params;
+			const userId = req.user?.sub;
+			if (!userId) {
+				return res.status(401).json({ message: req.t('errors.unauthorized') });
+			}
+			const actor = await this.userService.findById(userId);
+			if (!actor) {
+				return res.status(401).json({ message: req.t('errors.unauthorized') });
+			}
+			const updatedSource = await IngestionService.stopImport(id, actor, req.ip || 'unknown');
+			const safeSource = this.toSafeIngestionSource(updatedSource);
+			return res.status(200).json(safeSource);
+		} catch (error) {
+			logger.error({ err: error }, `Stop import for ${req.params.id} error`);
 			if (error instanceof Error && error.message === 'Ingestion source not found') {
 				return res.status(404).json({ message: req.t('ingestion.notFound') });
 			}

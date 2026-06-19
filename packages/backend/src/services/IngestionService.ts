@@ -446,7 +446,85 @@ export class IngestionService {
 		if (checkpoint?.complete) {
 			return false;
 		}
-		return source.status === 'error' || checkpoint !== undefined;
+		if (source.status === 'imported') {
+			return false;
+		}
+		return (
+			source.status === 'error' ||
+			source.status === 'paused' ||
+			checkpoint !== undefined
+		);
+	}
+
+	public static async cancelJobsForSource(sourceId: string): Promise<void> {
+		const jobTypes: JobType[] = ['active', 'waiting', 'failed', 'delayed', 'paused'];
+		const jobs = await ingestionQueue.getJobs(jobTypes);
+		for (const job of jobs) {
+			if (job.data.ingestionSourceId !== sourceId) {
+				continue;
+			}
+			try {
+				const state = await job.getState();
+				if (state === 'active') {
+					await job.moveToFailed(new Error('Stopped by user'), '0', true);
+				} else {
+					await job.remove();
+				}
+				logger.info(
+					{ jobId: job.id, ingestionSourceId: sourceId, state },
+					'Cancelled ingestion queue job'
+				);
+			} catch (error) {
+				logger.error(
+					{ err: error, jobId: job.id, ingestionSourceId: sourceId },
+					'Failed to cancel ingestion queue job'
+				);
+			}
+		}
+	}
+
+	public static async stopImport(
+		id: string,
+		actor?: User,
+		actorIp?: string
+	): Promise<IngestionSource> {
+		const source = await this.findById(id);
+		if (!source) {
+			throw new Error('Ingestion source not found');
+		}
+
+		await this.cancelJobsForSource(id);
+
+		const message =
+			source.status === 'importing' || source.status === 'syncing'
+				? 'Import stopped by user.'
+				: 'Sync stopped by user.';
+
+		const updated = await this.update(
+			id,
+			{
+				status: 'paused',
+				lastSyncStatusMessage: message,
+			},
+			actor,
+			actorIp
+		);
+
+		if (actor) {
+			await this.auditService.createAuditLog({
+				actorIdentifier: actor.id,
+				actionType: 'SYNC',
+				targetType: 'IngestionSource',
+				targetId: id,
+				actorIp: actorIp || 'unknown',
+				details: {
+					sourceName: source.name,
+					action: 'stop_import',
+				},
+			});
+		}
+
+		return updated;
 	}
 
 	public static async triggerResumeImport(
@@ -466,17 +544,7 @@ export class IngestionService {
 		const connector = EmailProviderFactory.createConnector(source);
 		await connector.testConnection();
 
-		const jobTypes: JobType[] = ['active', 'waiting', 'failed', 'delayed', 'paused'];
-		const jobs = await ingestionQueue.getJobs(jobTypes);
-		for (const job of jobs) {
-			if (job.data.ingestionSourceId === id) {
-				try {
-					await job.remove();
-				} catch (error) {
-					logger.error({ err: error, jobId: job.id }, 'Failed to remove stale job before resume.');
-				}
-			}
-		}
+		await this.cancelJobsForSource(id);
 
 		const resumeLabel =
 			mode === 'dedup'

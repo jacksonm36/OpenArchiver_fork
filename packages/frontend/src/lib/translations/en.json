@@ -126,7 +126,14 @@
 			"resume_dedup_description": "Fast-forward through already-archived messages (duplicate skip) from the last checkpoint.",
 			"resume_checkpoint": "Last processed: message #{{index}}",
 			"resume_import_success": "Import resume queued",
-			"resume_import_failed": "Failed to resume import"
+			"resume_import_failed": "Failed to resume import",
+			"pause_import": "Pause import",
+			"pause_import_success": "Import paused",
+			"pause_import_failed": "Failed to pause import",
+			"stop_import": "Stop import",
+			"stop_import_success": "Import stopped",
+			"stop_import_failed": "Failed to stop import",
+			"restart_import": "Restart import"
 		},
 		"search": {
 			"title": "Search",
@@ -395,6 +402,8 @@
 			"sender": "Sender",
 			"inbox": "Inbox",
 			"path": "Path",
+			"folders": "Folders",
+			"all_mail": "All mail",
 			"actions": "Actions",
 			"view": "View",
 			"no_emails_found": "No archived emails found.",

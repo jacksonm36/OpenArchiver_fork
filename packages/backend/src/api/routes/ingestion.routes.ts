@@ -235,6 +235,12 @@ export const createIngestionRouter = (
 		ingestionController.resumeImport
 	);
 
+	router.post(
+		'/:id/stop-import',
+		requirePermission('update', 'ingestion'),
+		ingestionController.stopImport
+	);
+
 	/**
 	 * @openapi
 	 * /v1/ingestion-sources/{id}/pause:

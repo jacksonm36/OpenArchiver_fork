@@ -74,6 +74,12 @@ export const createArchivedEmailRouter = (
 	 *         $ref: '#/components/responses/InternalServerError'
 	 */
 	router.get(
+		'/ingestion-source/:ingestionSourceId/folders',
+		requirePermission('read', 'archive'),
+		archivedEmailController.getFolderTree
+	);
+
+	router.get(
 		'/ingestion-source/:ingestionSourceId',
 		requirePermission('read', 'archive'),
 		archivedEmailController.getArchivedEmails

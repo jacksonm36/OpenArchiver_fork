@@ -4,6 +4,7 @@
 	import * as Card from '$lib/components/ui/card';
 	import EmailPreview from '$lib/components/custom/EmailPreview.svelte';
 	import EmailThread from '$lib/components/custom/EmailThread.svelte';
+	import FolderPathBreadcrumb from '$lib/components/custom/FolderPathBreadcrumb.svelte';
 	import { api } from '$lib/api.client';
 	import { browser } from '$app/environment';
 	import { formatBytes } from '$lib/utils';
@@ -305,9 +306,7 @@
 								{#if email.path}
 									<div class="flex flex-wrap items-center gap-2">
 										<span>{$t('app.archive.folder')}:</span>
-										<span class="bg-muted truncate rounded p-1.5 text-xs"
-											>{email.path || '/'}</span
-										>
+										<FolderPathBreadcrumb path={email.path} />
 									</div>
 								{/if}
 								{#if email.tags && email.tags.length > 0}

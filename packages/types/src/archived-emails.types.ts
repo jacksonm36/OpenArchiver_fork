@@ -63,3 +63,13 @@ export interface PaginatedArchivedEmails {
 	page: number;
 	limit: number;
 }
+
+/**
+ * A node in the archive folder tree (PST / IMAP folder hierarchy).
+ */
+export interface ArchiveFolderNode {
+	name: string;
+	path: string;
+	count: number;
+	children: ArchiveFolderNode[];
+}

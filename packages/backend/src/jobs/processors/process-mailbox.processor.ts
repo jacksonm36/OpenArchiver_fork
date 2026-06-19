@@ -99,6 +99,15 @@ export const processMailboxProcessor = async (job: Job<IProcessMailboxJob>) => {
 			checkDuplicate,
 			fileImportProgress
 		)) {
+			const latest = await IngestionService.findById(ingestionSourceId);
+			if (!latest || latest.status === 'paused') {
+				logger.info(
+					{ ingestionSourceId, userEmail },
+					'Stopping mailbox processing — source is paused'
+				);
+				break;
+			}
+
 			if (!email) {
 				continue;
 			}

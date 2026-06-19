@@ -4,6 +4,8 @@
 
 # Node
 node_modules
+**/node_modules
+**/.svelte-kit
 .pnpm-store
 
 # Env
@@ -44,3 +46,6 @@ Dockerfile
 
 # Local data
 meili_data
+data
+**/data/imports/**
+*.pst

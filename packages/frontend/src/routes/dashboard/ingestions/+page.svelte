@@ -3,7 +3,7 @@
 	import * as Table from '$lib/components/ui/table';
 	import { Button } from '$lib/components/ui/button';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, Activity, Play, FileDown } from 'lucide-svelte';
+	import { MoreHorizontal, Trash, RefreshCw, ChevronRight, Activity, Play, FileDown, Pause, Square, RotateCcw } from 'lucide-svelte';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Switch } from '$lib/components/ui/switch';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -42,10 +42,21 @@
 	const FILE_BASED_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
 
 	function canResumeSource(source: SafeIngestionSource): boolean {
-		return (
-			FILE_BASED_PROVIDERS.includes(source.provider as (typeof FILE_BASED_PROVIDERS)[number]) &&
-			source.status === 'error'
-		);
+		if (!FILE_BASED_PROVIDERS.includes(source.provider as (typeof FILE_BASED_PROVIDERS)[number])) {
+			return false;
+		}
+		if (['importing', 'syncing', 'imported'].includes(source.status)) {
+			return false;
+		}
+		const checkpoint = Object.values(source.syncState?.fileImport ?? {})[0];
+		if (checkpoint?.complete) {
+			return false;
+		}
+		return source.status === 'error' || source.status === 'paused' || checkpoint !== undefined;
+	}
+
+	function isActiveImport(source: SafeIngestionSource): boolean {
+		return source.status === 'importing' || source.status === 'syncing';
 	}
 
 	function exportGroupSourceId(source: SafeIngestionSource): string {
@@ -99,6 +110,56 @@
 				show: true,
 			});
 		}
+	}
+
+	async function handleStopImport(source: SafeIngestionSource) {
+		const res = await api(`/ingestion-sources/${source.id}/stop-import`, { method: 'POST' });
+		if (!res.ok) {
+			const errorBody = await res.json().catch(() => ({}));
+			setAlert({
+				type: 'error',
+				title: $t('app.ingestions.stop_import_failed'),
+				message: errorBody.message || JSON.stringify(errorBody),
+				duration: 5000,
+				show: true,
+			});
+			return;
+		}
+		const updated: SafeIngestionSource = await res.json();
+		ingestionSources = ingestionSources.map((s) => (s.id === updated.id ? updated : s));
+		setAlert({
+			type: 'success',
+			title: $t('app.ingestions.stop_import_success'),
+			message: '',
+			duration: 3000,
+			show: true,
+		});
+		await refreshSourcesAndDiagnostics();
+	}
+
+	async function handlePauseImport(source: SafeIngestionSource) {
+		const res = await api(`/ingestion-sources/${source.id}/pause`, { method: 'POST' });
+		if (!res.ok) {
+			const errorBody = await res.json().catch(() => ({}));
+			setAlert({
+				type: 'error',
+				title: $t('app.ingestions.pause_import_failed'),
+				message: errorBody.message || JSON.stringify(errorBody),
+				duration: 5000,
+				show: true,
+			});
+			return;
+		}
+		const updated: SafeIngestionSource = await res.json();
+		ingestionSources = ingestionSources.map((s) => (s.id === updated.id ? updated : s));
+		setAlert({
+			type: 'success',
+			title: $t('app.ingestions.pause_import_success'),
+			message: '',
+			duration: 3000,
+			show: true,
+		});
+		await refreshSourcesAndDiagnostics();
 	}
 
 	async function handleResumeImport(id: string, mode: ResumeImportMode = 'import') {
@@ -702,6 +763,36 @@
 							>
 							<Table.Cell class="text-right">
 								<div class="flex items-center justify-end gap-1">
+									{#if isActiveImport(source)}
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-8 w-8"
+											title={$t('app.ingestions.pause_import')}
+											onclick={() => handlePauseImport(source)}
+										>
+											<Pause class="h-4 w-4" />
+										</Button>
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-8 w-8"
+											title={$t('app.ingestions.stop_import')}
+											onclick={() => handleStopImport(source)}
+										>
+											<Square class="h-4 w-4" />
+										</Button>
+									{:else if canResumeSource(source)}
+										<Button
+											variant="ghost"
+											size="icon"
+											class="h-8 w-8"
+											title={$t('app.ingestions.restart_import')}
+											onclick={() => handleResumeImport(source.id, 'import')}
+										>
+											<RotateCcw class="h-4 w-4" />
+										</Button>
+									{/if}
 									<Button
 										variant="ghost"
 										size="icon"
@@ -711,6 +802,39 @@
 									>
 										<Activity class="h-4 w-4" />
 									</Button>
+									<DropdownMenu.Root>
+										<DropdownMenu.Trigger>
+											{#snippet child({ props })}
+												<Button
+													{...props}
+													variant="ghost"
+													size="icon"
+													class="h-8 w-8"
+													title={$t('app.ingestions.export_eml_zip_hint')}
+												>
+													<FileDown class="h-4 w-4" />
+													<span class="sr-only">{$t('app.ingestions.export_mbox')}</span>
+												</Button>
+											{/snippet}
+										</DropdownMenu.Trigger>
+										<DropdownMenu.Content align="end">
+											<DropdownMenu.Label
+												>{$t('app.ingestions.export_eml_zip_hint')}</DropdownMenu.Label
+											>
+											<DropdownMenu.Item
+												onclick={() => downloadArchiveExport(source, 'mbox')}
+											>
+												<FileDown class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.export_mbox')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Item
+												onclick={() => downloadArchiveExport(source, 'zip')}
+											>
+												<FileDown class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.export_eml_zip')}
+											</DropdownMenu.Item>
+										</DropdownMenu.Content>
+									</DropdownMenu.Root>
 									<DropdownMenu.Root>
 									<DropdownMenu.Trigger>
 										{#snippet child({ props })}
@@ -726,22 +850,37 @@
 										<DropdownMenu.Label
 											>{$t('app.ingestions.actions')}</DropdownMenu.Label
 										>
+										{#if isActiveImport(source)}
+											<DropdownMenu.Item onclick={() => handlePauseImport(source)}>
+												<Pause class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.pause_import')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Item onclick={() => handleStopImport(source)}>
+												<Square class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.stop_import')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Separator />
+										{:else if canResumeSource(source)}
+											<DropdownMenu.Item
+												onclick={() => handleResumeImport(source.id, 'import')}
+											>
+												<RotateCcw class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.restart_import')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Item
+												onclick={() => handleResumeImport(source.id, 'dedup')}
+											>
+												<Play class="mr-2 h-4 w-4" />
+												{$t('app.ingestions.resume_dedup')}
+											</DropdownMenu.Item>
+											<DropdownMenu.Separator />
+										{/if}
 										<DropdownMenu.Item onclick={() => openEditDialog(source)}
 											>{$t('app.ingestions.edit')}</DropdownMenu.Item
 										>
 										<DropdownMenu.Item onclick={() => openDiagnostics(source)}
 											>{$t('app.ingestions.view_diagnostics')}</DropdownMenu.Item
 										>
-										{#if canResumeSource(source)}
-											<DropdownMenu.Item onclick={() => handleResumeImport(source.id, 'dedup')}>
-												<Play class="mr-2 h-4 w-4" />
-												{$t('app.ingestions.resume_dedup')}
-											</DropdownMenu.Item>
-											<DropdownMenu.Item onclick={() => handleResumeImport(source.id, 'import')}>
-												<Play class="mr-2 h-4 w-4" />
-												{$t('app.ingestions.resume_import')}
-											</DropdownMenu.Item>
-										{/if}
 										<DropdownMenu.Item onclick={() => handleSync(source.id)}
 											>{$t('app.ingestions.force_sync')}</DropdownMenu.Item
 										>
