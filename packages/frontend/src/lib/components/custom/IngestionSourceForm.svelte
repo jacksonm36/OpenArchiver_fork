@@ -97,15 +97,13 @@
 		streamAttachmentsOnImport: Boolean(source?.streamAttachmentsOnImport ?? true),
 	});
 
-	let activeProvider = $state(initialProvider);
-
-	$effect(() => {
-		const provider = formData.provider as IngestionProvider;
-		if (provider !== activeProvider) {
-			activeProvider = provider;
-			formData.providerConfig = createProviderConfig(provider);
+	function setProvider(provider: IngestionProvider) {
+		if (formData.provider === provider) {
+			return;
 		}
-	});
+		formData.provider = provider;
+		formData.providerConfig = createProviderConfig(provider);
+	}
 
 	const triggerContent = $derived(
 		providerOptions.find((p) => p.value === formData.provider)?.label ??
@@ -285,7 +283,16 @@
 	</div>
 	<div class="grid grid-cols-4 items-center gap-4">
 		<Label for="provider" class="text-left">{$t('app.ingestions.provider')}</Label>
-		<Select.Root name="provider" bind:value={formData.provider} type="single">
+		<Select.Root
+			name="provider"
+			type="single"
+			value={formData.provider}
+			onValueChange={(value) => {
+				if (value) {
+					setProvider(value as IngestionProvider);
+				}
+			}}
+		>
 			<Select.Trigger class="col-span-3">
 				{triggerContent}
 			</Select.Trigger>
@@ -297,6 +304,7 @@
 		</Select.Root>
 	</div>
 
+	{#key formData.provider}
 	{#if formData.provider === 'google_workspace'}
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="serviceAccountKeyJson" class="text-left"
@@ -383,7 +391,13 @@
 			<Label for="secure" class="text-left"
 				>{$t('app.components.ingestion_source_form.use_tls')}</Label
 			>
-			<Checkbox id="secure" bind:checked={formData.providerConfig.secure} />
+			<Checkbox
+				id="secure"
+				checked={formData.providerConfig.secure === true}
+				onCheckedChange={(checked) => {
+					formData.providerConfig.secure = checked;
+				}}
+			/>
 		</div>
 		<div class="grid grid-cols-4 items-center gap-4">
 			<Label for="allowInsecureCert" class="text-left"
@@ -391,7 +405,10 @@
 			>
 			<Checkbox
 				id="allowInsecureCert"
-				bind:checked={formData.providerConfig.allowInsecureCert}
+				checked={formData.providerConfig.allowInsecureCert === true}
+				onCheckedChange={(checked) => {
+					formData.providerConfig.allowInsecureCert = checked;
+				}}
 			/>
 		</div>
 	{:else if formData.provider === 'pst_import'}
@@ -615,7 +632,8 @@
 				</div>
 			</div>
 		{/if}
-	{/if}
+		{/if}
+	{/key}
 	{#if formData.provider === 'google_workspace' || formData.provider === 'microsoft_365'}
 		<Alert.Root>
 			<Alert.Title>{$t('app.components.ingestion_source_form.heads_up')}</Alert.Title>
@@ -695,7 +713,10 @@
 					</div>
 					<Checkbox
 						id="preserveOriginalFile"
-						bind:checked={formData.preserveOriginalFile}
+						checked={formData.preserveOriginalFile === true}
+						onCheckedChange={(checked) => {
+							formData.preserveOriginalFile = checked;
+						}}
 					/>
 				</div>
 
@@ -720,7 +741,13 @@
 								<Info class="h-4 w-4" />
 							</span>
 						</div>
-						<Checkbox id="mergeEnabled" bind:checked={mergeEnabled} />
+						<Checkbox
+							id="mergeEnabled"
+							checked={mergeEnabled}
+							onCheckedChange={(checked) => {
+								mergeEnabled = checked;
+							}}
+						/>
 					</div>
 
 					{#if mergeEnabled}
