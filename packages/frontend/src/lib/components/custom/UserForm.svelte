@@ -79,7 +79,16 @@
 	{/if}
 	<div class="grid grid-cols-4 items-center gap-4">
 		<Label for="role" class="text-left">{$t('app.users.role')}</Label>
-		<Select.Root name="role" bind:value={formData.roleId} type="single">
+		<Select.Root
+			name="role"
+			type="single"
+			value={formData.roleId}
+			onValueChange={(value) => {
+				if (value) {
+					formData.roleId = value;
+				}
+			}}
+		>
 			<Select.Trigger class="col-span-3">
 				{triggerContent}
 			</Select.Trigger>

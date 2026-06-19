@@ -32,7 +32,12 @@
 			case 'pst_import':
 			case 'eml_import':
 			case 'mbox_import':
-				return { type: provider, localFilePath: '' };
+				return {
+					type: provider,
+					localFilePath: '',
+					uploadedFilePath: '',
+					uploadedFileName: '',
+				};
 			default:
 				return {
 					type: 'generic_imap',
@@ -44,6 +49,33 @@
 					allowInsecureCert: false,
 				};
 		}
+	}
+
+	const FILE_IMPORT_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
+
+	type FileImportProvider = (typeof FILE_IMPORT_PROVIDERS)[number];
+
+	const FILE_IMPORT_META: Record<
+		FileImportProvider,
+		{ accept: string; placeholder: string; hintKey?: string }
+	> = {
+		pst_import: {
+			accept: '.pst',
+			placeholder: '/var/data/open-archiver/imports/archive.pst',
+			hintKey: 'pst_large_file_hint',
+		},
+		eml_import: {
+			accept: '.zip',
+			placeholder: '/var/data/open-archiver/imports/archive.zip',
+		},
+		mbox_import: {
+			accept: '.mbox',
+			placeholder: '/var/data/open-archiver/imports/archive.mbox',
+		},
+	};
+
+	function isFileImportProvider(provider: string): provider is FileImportProvider {
+		return FILE_IMPORT_PROVIDERS.includes(provider as FileImportProvider);
 	}
 
 	let {
@@ -103,6 +135,28 @@
 		}
 		formData.provider = provider;
 		formData.providerConfig = createProviderConfig(provider);
+		if (isFileImportProvider(provider)) {
+			importMethod = 'local';
+			fileUploading = false;
+			uploadProgress = null;
+		}
+	}
+
+	function setImportMethod(method: 'upload' | 'local') {
+		if (importMethod === method) {
+			return;
+		}
+		importMethod = method;
+		if (!isFileImportProvider(formData.provider)) {
+			return;
+		}
+		const config = formData.providerConfig;
+		if (method === 'upload') {
+			config.localFilePath = '';
+		} else {
+			config.uploadedFilePath = '';
+			config.uploadedFileName = '';
+		}
 	}
 
 	const triggerContent = $derived(
@@ -117,31 +171,36 @@
 	let mergeEnabled = $state(false);
 	let importMethod = $state<'upload' | 'local'>('local');
 
-	const FILE_IMPORT_PROVIDERS = ['pst_import', 'eml_import', 'mbox_import'] as const;
-
 	let importSettings = $state<IImportSettings | null>(null);
-	let previousFileImportProvider = $state<string | null>(null);
+
+	const activeFileImportProvider = $derived(
+		isFileImportProvider(formData.provider) ? formData.provider : null
+	);
+
+	const activeFileImportMeta = $derived(
+		activeFileImportProvider ? FILE_IMPORT_META[activeFileImportProvider] : null
+	);
+
+	const activeFileImportFileLabel = $derived.by(() => {
+		if (!activeFileImportProvider) {
+			return '';
+		}
+		switch (activeFileImportProvider) {
+			case 'pst_import':
+				return $t('app.components.ingestion_source_form.pst_file');
+			case 'eml_import':
+				return $t('app.components.ingestion_source_form.eml_file');
+			case 'mbox_import':
+				return $t('app.components.ingestion_source_form.mbox_file');
+		}
+	});
 
 	onMount(async () => {
 		const res = await api('/ingestion-sources/import-settings');
 		if (res.ok) {
 			importSettings = await res.json();
 			if (importSettings?.localPathOnly) {
-				importMethod = 'local';
-			}
-		}
-	});
-
-	$effect(() => {
-		const provider = formData.provider;
-		if (
-			!source &&
-			FILE_IMPORT_PROVIDERS.includes(provider as (typeof FILE_IMPORT_PROVIDERS)[number]) &&
-			provider !== previousFileImportProvider
-		) {
-			previousFileImportProvider = provider;
-			if (importSettings?.localPathOnly) {
-				importMethod = 'local';
+				setImportMethod('local');
 			}
 		}
 	});
@@ -153,27 +212,10 @@
 		}
 	});
 
-	$effect(() => {
-		if (importMethod === 'upload') {
-			if ('localFilePath' in formData.providerConfig) {
-				delete formData.providerConfig.localFilePath;
-			}
-		} else {
-			if ('uploadedFilePath' in formData.providerConfig) {
-				delete formData.providerConfig.uploadedFilePath;
-			}
-			if ('uploadedFileName' in formData.providerConfig) {
-				delete formData.providerConfig.uploadedFileName;
-			}
-		}
-	});
-
 	const handleSubmit = async (event: Event) => {
 		event.preventDefault();
 
-		const isFileImport = FILE_IMPORT_PROVIDERS.includes(
-			formData.provider as (typeof FILE_IMPORT_PROVIDERS)[number]
-		);
+		const isFileImport = isFileImportProvider(formData.provider);
 		const useLocalPath =
 			isFileImport && (importMethod === 'local' || importSettings?.localPathOnly);
 
@@ -411,7 +453,7 @@
 				}}
 			/>
 		</div>
-	{:else if formData.provider === 'pst_import'}
+	{:else if activeFileImportProvider && activeFileImportMeta}
 		{#if importSettings?.localPathOnly}
 			<Alert.Root>
 				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
@@ -424,16 +466,24 @@
 				<Label class="pt-2 text-left"
 					>{$t('app.components.ingestion_source_form.import_method')}</Label
 				>
-				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
+				<RadioGroup.Root
+					value={importMethod}
+					onValueChange={(value) => {
+						if (value === 'upload' || value === 'local') {
+							setImportMethod(value);
+						}
+					}}
+					class="col-span-3 flex flex-col space-y-1"
+				>
 					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="upload" id="pst-upload" />
-						<Label for="pst-upload"
+						<RadioGroup.Item value="upload" id="{activeFileImportProvider}-upload" />
+						<Label for="{activeFileImportProvider}-upload"
 							>{$t('app.components.ingestion_source_form.upload_file')}</Label
 						>
 					</div>
 					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="local" id="pst-local" />
-						<Label for="pst-local"
+						<RadioGroup.Item value="local" id="{activeFileImportProvider}-local" />
+						<Label for="{activeFileImportProvider}-local"
 							>{$t('app.components.ingestion_source_form.local_path')}</Label
 						>
 					</div>
@@ -441,198 +491,65 @@
 			</div>
 		{/if}
 
-		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="pst-file" class="text-left"
-					>{$t('app.components.ingestion_source_form.pst_file')}</Label
-				>
-				<div class="col-span-3 space-y-2">
-					<div class="flex flex-row items-center space-x-2">
-						<Input
-							id="pst-file"
-							type="file"
-							accept=".pst"
-							onchange={handleFileChange}
-							disabled={fileUploading}
-						/>
-						{#if fileUploading}
-							<span class="text-primary animate-spin"><Loader2 /></span>
+		{#key `${activeFileImportProvider}-${importMethod}`}
+			{#if importMethod === 'upload' && !importSettings?.localPathOnly}
+				<div class="grid grid-cols-4 items-center gap-4">
+					<Label for="{activeFileImportProvider}-file" class="text-left"
+						>{activeFileImportFileLabel}</Label
+					>
+					<div class="col-span-3 space-y-2">
+						<div class="flex flex-row items-center space-x-2">
+							<Input
+								id="{activeFileImportProvider}-file"
+								type="file"
+								accept={activeFileImportMeta.accept}
+								onchange={handleFileChange}
+								disabled={fileUploading}
+							/>
+							{#if fileUploading}
+								<span class="text-primary animate-spin"><Loader2 /></span>
+							{/if}
+						</div>
+						{#if uploadProgress}
+							<div class="space-y-1">
+								<Progress value={uploadProgress.percent} class="h-2" />
+								<p class="text-muted-foreground text-xs">
+									{$t('app.components.ingestion_source_form.upload_progress', {
+										percent: uploadProgress.percent,
+										loaded: formatUploadBytes(uploadProgress.loaded),
+										total: formatUploadBytes(uploadProgress.total),
+									})}
+								</p>
+							</div>
+						{/if}
+						{#if activeFileImportMeta.hintKey === 'pst_large_file_hint'}
+							<p class="text-muted-foreground text-xs">
+								{$t('app.components.ingestion_source_form.pst_large_file_hint')}
+							</p>
 						{/if}
 					</div>
-					{#if uploadProgress}
-						<div class="space-y-1">
-							<Progress value={uploadProgress.percent} class="h-2" />
-							<p class="text-muted-foreground text-xs">
-								{$t('app.components.ingestion_source_form.upload_progress', {
-									percent: uploadProgress.percent,
-									loaded: formatUploadBytes(uploadProgress.loaded),
-									total: formatUploadBytes(uploadProgress.total),
-								})}
-							</p>
-						</div>
-					{/if}
-					<p class="text-muted-foreground text-xs">
-						{$t('app.components.ingestion_source_form.pst_large_file_hint')}
-					</p>
 				</div>
-			</div>
-		{:else}
-			<div class="grid grid-cols-4 items-start gap-4">
-				<Label for="pst-local-path" class="pt-2 text-left"
-					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
-				>
-				<div class="col-span-3 space-y-3">
-					<Input
-						id="pst-local-path"
-						bind:value={formData.providerConfig.localFilePath}
-						placeholder="/var/data/open-archiver/imports/archive.pst"
-						required
-					/>
-					<LocalImportFilePicker
-						provider="pst_import"
-						settings={importSettings}
-						bind:value={formData.providerConfig.localFilePath}
-					/>
-				</div>
-			</div>
-		{/if}
-	{:else if formData.provider === 'eml_import'}
-		{#if importSettings?.localPathOnly}
-			<Alert.Root>
-				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
-				<Alert.Description>
-					{$t('app.components.ingestion_source_form.local_path_only_description')}
-				</Alert.Description>
-			</Alert.Root>
-		{:else}
-			<div class="grid grid-cols-4 items-start gap-4">
-				<Label class="pt-2 text-left"
-					>{$t('app.components.ingestion_source_form.import_method')}</Label
-				>
-				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
-					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="upload" id="eml-upload" />
-						<Label for="eml-upload"
-							>{$t('app.components.ingestion_source_form.upload_file')}</Label
-						>
+			{:else}
+				<div class="grid grid-cols-4 items-start gap-4">
+					<Label for="{activeFileImportProvider}-local-path" class="pt-2 text-left"
+						>{$t('app.components.ingestion_source_form.local_file_path')}</Label
+					>
+					<div class="col-span-3 space-y-3">
+						<Input
+							id="{activeFileImportProvider}-local-path"
+							bind:value={formData.providerConfig.localFilePath}
+							placeholder={activeFileImportMeta.placeholder}
+							required
+						/>
+						<LocalImportFilePicker
+							provider={activeFileImportProvider}
+							settings={importSettings}
+							bind:value={formData.providerConfig.localFilePath}
+						/>
 					</div>
-					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="local" id="eml-local" />
-						<Label for="eml-local"
-							>{$t('app.components.ingestion_source_form.local_path')}</Label
-						>
-					</div>
-				</RadioGroup.Root>
-			</div>
-		{/if}
-
-		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="eml-file" class="text-left"
-					>{$t('app.components.ingestion_source_form.eml_file')}</Label
-				>
-				<div class="col-span-3 flex flex-row items-center space-x-2">
-					<Input
-						id="eml-file"
-						type="file"
-						class=""
-						accept=".zip"
-						onchange={handleFileChange}
-					/>
-					{#if fileUploading}
-						<span class=" text-primary animate-spin"><Loader2 /></span>
-					{/if}
 				</div>
-			</div>
-		{:else}
-			<div class="grid grid-cols-4 items-start gap-4">
-				<Label for="eml-local-path" class="pt-2 text-left"
-					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
-				>
-				<div class="col-span-3 space-y-3">
-					<Input
-						id="eml-local-path"
-						bind:value={formData.providerConfig.localFilePath}
-						placeholder="/var/data/open-archiver/imports/archive.zip"
-						required
-					/>
-					<LocalImportFilePicker
-						provider="eml_import"
-						settings={importSettings}
-						bind:value={formData.providerConfig.localFilePath}
-					/>
-				</div>
-			</div>
-		{/if}
-	{:else if formData.provider === 'mbox_import'}
-		{#if importSettings?.localPathOnly}
-			<Alert.Root>
-				<Alert.Title>{$t('app.components.ingestion_source_form.local_path_only_title')}</Alert.Title>
-				<Alert.Description>
-					{$t('app.components.ingestion_source_form.local_path_only_description')}
-				</Alert.Description>
-			</Alert.Root>
-		{:else}
-			<div class="grid grid-cols-4 items-start gap-4">
-				<Label class="pt-2 text-left"
-					>{$t('app.components.ingestion_source_form.import_method')}</Label
-				>
-				<RadioGroup.Root bind:value={importMethod} class="col-span-3 flex flex-col space-y-1">
-					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="upload" id="mbox-upload" />
-						<Label for="mbox-upload"
-							>{$t('app.components.ingestion_source_form.upload_file')}</Label
-						>
-					</div>
-					<div class="flex items-center space-x-2">
-						<RadioGroup.Item value="local" id="mbox-local" />
-						<Label for="mbox-local"
-							>{$t('app.components.ingestion_source_form.local_path')}</Label
-						>
-					</div>
-				</RadioGroup.Root>
-			</div>
-		{/if}
-
-		{#if importMethod === 'upload' && !importSettings?.localPathOnly}
-			<div class="grid grid-cols-4 items-center gap-4">
-				<Label for="mbox-file" class="text-left"
-					>{$t('app.components.ingestion_source_form.mbox_file')}</Label
-				>
-				<div class="col-span-3 flex flex-row items-center space-x-2">
-					<Input
-						id="mbox-file"
-						type="file"
-						class=""
-						accept=".mbox"
-						onchange={handleFileChange}
-					/>
-					{#if fileUploading}
-						<span class=" text-primary animate-spin"><Loader2 /></span>
-					{/if}
-				</div>
-			</div>
-		{:else}
-			<div class="grid grid-cols-4 items-start gap-4">
-				<Label for="mbox-local-path" class="pt-2 text-left"
-					>{$t('app.components.ingestion_source_form.local_file_path')}</Label
-				>
-				<div class="col-span-3 space-y-3">
-					<Input
-						id="mbox-local-path"
-						bind:value={formData.providerConfig.localFilePath}
-						placeholder="/var/data/open-archiver/imports/archive.mbox"
-						required
-					/>
-					<LocalImportFilePicker
-						provider="mbox_import"
-						settings={importSettings}
-						bind:value={formData.providerConfig.localFilePath}
-					/>
-				</div>
-			</div>
-		{/if}
-		{/if}
+			{/if}
+		{/key}
 	{/key}
 	{#if formData.provider === 'google_workspace' || formData.provider === 'microsoft_365'}
 		<Alert.Root>
@@ -658,7 +575,7 @@
 
 		{#if showAdvanced}
 			<div class="mt-3 grid gap-4">
-				{#if FILE_IMPORT_PROVIDERS.includes(formData.provider as (typeof FILE_IMPORT_PROVIDERS)[number])}
+				{#if isFileImportProvider(formData.provider)}
 					<div class="grid grid-cols-4 items-center gap-4">
 						<div class="flex items-center gap-1 text-left">
 							<Label for="streamAttachmentsOnImport"
